@@ -1395,7 +1395,10 @@ final class PdfToolsModel: ObservableObject {
     @Published var rows: [ProbeRow] = []
     @Published var mode = "shrink" { didSet { save() } }     // shrink / ocr / mrc
     @Published var outDir: URL?
-    @Published var langs = "ko-KR,en-US,zh-Hans" { didSet { save() } }
+    static let defaultLangs = "ko-KR,en-US,zh-Hans,it-IT"
+    /// 历代默认值。存的还是某个旧默认值时自动升级到新默认;用户自己改过的一律不动。
+    static let legacyLangs = ["ko-KR,en-US,zh-Hans"]
+    @Published var langs = PdfToolsModel.defaultLangs { didSet { save() } }
     // MRC 是备用路线(用户看过样张后否掉过),参数照搬教材档
     @Published var mrcMask = 2600 { didSet { save() } }
     @Published var mrcBg = 1500 { didSet { save() } }
@@ -1417,7 +1420,10 @@ final class PdfToolsModel: ObservableObject {
     init() {
         let d = UserDefaults.standard
         if let m = d.string(forKey: "pdfMode") { mode = m }
-        if let l = d.string(forKey: "pdfLangs") { langs = l }
+        if let l = d.string(forKey: "pdfLangs") {
+            // 加新语言时,老用户存着的旧默认值要跟着升级,否则新语言永远轮不到他
+            langs = PdfToolsModel.legacyLangs.contains(l) ? PdfToolsModel.defaultLangs : l
+        }
         if d.object(forKey: "pdfMrcMask") != nil {
             mrcMask = d.integer(forKey: "pdfMrcMask")
             mrcBg = d.integer(forKey: "pdfMrcBg")

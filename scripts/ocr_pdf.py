@@ -29,7 +29,7 @@ import pikepdf
 
 PROG = False
 SUFFIX = "_ocr"
-DEFAULT_LANGS = "ko-KR,en-US,zh-Hans"
+DEFAULT_LANGS = "ko-KR,en-US,zh-Hans,it-IT"
 
 
 def emit(*a):
