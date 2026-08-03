@@ -1,0 +1,15 @@
+# 构建产物（.app 由 `python3 app/build_app.py` 生成）
+app/build/
+
+# 分发包 .dmg / .zip —— 走 GitHub Releases，不进版本库
+app/dist/
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+
+# Claude Code 本机设置
+.claude/settings.local.json
