@@ -50,7 +50,10 @@ Windows 移植的交接文档见 [`app/WINDOWS_移植交接.md`](app/WINDOWS_移
 
 完整选项见 `--help`。
 
-## 构建图形界面
+## 图形界面：下载或自行构建
+
+打包好的 macOS 应用在 [Releases](https://github.com/lpoterus-commits/ScanPress/releases/latest)（`.dmg` / `.zip`）。
+也可以从源码构建：
 
 ```bash
 python3 app/build_app.py
