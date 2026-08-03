@@ -13,3 +13,6 @@ __pycache__/
 
 # Claude Code 本机设置
 .claude/settings.local.json
+
+# sphelper 是构建产物(build_app.py 从 app/SPHelper.swift 编译)
+scripts/sphelper

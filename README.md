@@ -41,6 +41,20 @@ python3 -m venv ~/.venvs/pdfenv && ~/.venvs/pdfenv/bin/pip install pikepdf img2p
 目前只在 Apple Silicon 的 macOS 上验证过。
 Windows 移植的交接文档见 [`app/WINDOWS_移植交接.md`](app/WINDOWS_移植交接.md)，尚未实现。
 
+## 已有 PDF 瘦身 / 加文字层
+
+```bash
+python scripts/shrink_pdf.py <PDF或目录> --analyze   # 体检：能省多少
+python scripts/shrink_pdf.py <PDF或目录>             # 无损重压
+python scripts/ocr_pdf.py <PDF> --lang ko-KR,en-US   # 加可搜索的隐形文字层
+```
+
+`shrink_pdf.py` 把 1 位黑白图的 CCITT G4 编码换成 JBIG2 通用编码 —— **位图一个比特都不变**，
+不是画质换体积。实测四本自扫韩语书 **354.8 MB → 148.6 MB（省 58%）**，全书逐像素比对零差异。
+
+`ocr_pdf.py` 用 macOS 自带的 Vision 框架加不可见文字层，**页面外观逐像素不变**，
+每页只增加约 1.2 KB。韩/中/日等 30 种语言，完全离线。
+
 ## 命令行用法
 
 ```bash

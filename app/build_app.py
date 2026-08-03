@@ -27,7 +27,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = [os.path.join(os.path.dirname(HERE), "scripts", n)
-           for n in ("scan2pdf.py", "merge_pdfs.py")]
+           for n in ("scan2pdf.py", "merge_pdfs.py", "shrink_pdf.py", "ocr_pdf.py")]
 VERSION = "2.2"
 APP_NAME = f"ScanPress {VERSION}"      # 版本号进应用名,一处改全处生效
 BIN_NAME = "ScanToPDF"
@@ -428,6 +428,14 @@ def main():
     run(["swiftc", "-parse-as-library", "-swift-version", "5", "-O",
          "-target", "arm64-apple-macos13.0",
          os.path.join(HERE, "ScanToPDF.swift"), "-o", os.path.join(macos, BIN_NAME)])
+
+    # sphelper:Vision 文字识别 + CoreGraphics 精确渲染的桥接工具,给 Python 引擎调用。
+    # 不能带 -parse-as-library —— 那是主程序 @main 需要的,命令行工具用了会禁掉顶层语句。
+    print("1.5/6 编译 sphelper(Vision 桥接)…")
+    helpers = os.path.join(app, "Contents", "Helpers")
+    os.makedirs(helpers, exist_ok=True)
+    run(["swiftc", "-swift-version", "5", "-O", "-target", "arm64-apple-macos13.0",
+         os.path.join(HERE, "SPHelper.swift"), "-o", os.path.join(helpers, "sphelper")])
 
     print("2/6 生成图标…")
     has_icon = make_icon(os.path.join(res, "AppIcon.icns"))
