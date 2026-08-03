@@ -28,7 +28,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = [os.path.join(os.path.dirname(HERE), "scripts", n)
            for n in ("scan2pdf.py", "merge_pdfs.py")]
-VERSION = "2.1"
+VERSION = "2.2"
 APP_NAME = f"ScanPress {VERSION}"      # 版本号进应用名,一处改全处生效
 BIN_NAME = "ScanToPDF"
 BUILD = os.path.join(HERE, "build")
