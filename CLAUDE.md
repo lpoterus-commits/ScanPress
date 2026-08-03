@@ -28,6 +28,20 @@ ScanPress/
 构建并安装:`python3 app/build_app.py`(只需 Xcode Command Line Tools,不需完整 Xcode)。
 `build_app.py` 按 `../scripts/` 找引擎脚本并复制进 .app,**改完脚本必须重跑它**,否则应用里还是旧引擎。
 
+## 已有 PDF 的处理(2026-08-03 新增,见 `scripts/shrink_pdf.py` / `ocr_pdf.py`)
+- **无损重压**(1 位黑白图 CCITT G4 → JBIG2 通用编码):四本自扫韩语书 **354.8 MB → 148.6 MB(省 58%)**,
+  80 秒,全书逐像素零差异。**必须用通用编码不能用符号模式**——符号模式有损,且实测在带扫描噪声的
+  原图上**反而大 19%**(噪声让同字每次像素都不同,词典失效)。两道保险缺一不可:`pil.load()` 强制完整
+  解码(否则损坏的 CCITT 流会**静默**产出残缺位图,实测某书两页各差 140 万像素,靠全书逐像素比对才发现),
+  以及 fd 层的 `capture_cstderr()` 接住 libtiff 抱怨(Python warnings 捕获不到 C 库输出)。
+- **Vision 不可见文字层**:macOS 自带 Vision,20 页韩语识别 445 行、5.2 秒、每页 +1.2 KB,
+  外观逐像素不变,PDFKit(Preview 的 Cmd+F)搜韩文全部命中。**同页韩语 Vision 完胜 Tesseract**
+  (0.56 秒全对 vs 1.39 秒漏标题+错字+吐垃圾)。代价:仅 macOS,且 Vision 模型随系统更新变化,
+  **这一步不像项目其余部分那样跨机器可复现**。
+- **⚠ MRC 重制已有彩色 PDF:用户看过样张后否掉**(「还是觉得原图好看」)。技术上成功(0.197×),
+  但对已经存在且看着挺好的书,用户的基准线是「我已经有它了」,门槛远高于「从散图新做一本」。
+  **不影响 scan2pdf.py 新建时的 mrc 档,那个用户认可并在用。** 无损 JPEG 重编码也试过,只省 4.3%,不值得做。
+
 ## 依赖内嵌进 .app(2026-08-03)
 `build_app.py` 的 `bundle_tools()` 把 magick / jbig2 / jbig2topdf.py 连同 **127 个 coder 模块 + 17 个 dylib**
 (15 MB,包总大小 20 MB)搬进包内,`install_name_tool` 把依赖路径改写成 `@loader_path` 相对引用,
