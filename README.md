@@ -2,10 +2,12 @@
 
 把扫描仪（CZUR 等）拍的整本书图片，做成**高清晰、小体积**的 PDF。
 
-全程确定性——不联网、不调用 AI、不做 OCR，同一批图片跑多少次结果都一样。
-提供命令行引擎和一个原生 macOS 图形界面。
+转换全程确定性——不联网、不调用 AI，同一批图片跑多少次结果都一样。
+提供命令行引擎和一个原生 macOS 图形界面（图片转 PDF ／ PDF 工具 ／ 合并 PDF）。
 
-> **交付物是纯图片 PDF：不可搜索、不可选取复制、没有目录书签。** 需要可搜索 PDF 请另找 OCR 方案。
+> **转换出的是纯图片 PDF：不可搜索、不可选取复制、没有目录书签。**
+> 需要可搜索的话，转完再用「PDF 工具 → 加文字层」补一层看不见的文字（macOS Vision，离线）。
+> 注意那一步用的是系统的识别模型，会随 macOS 更新变化，**不像其余部分那样跨机器可复现**。
 
 ## 实测效果
 
@@ -42,6 +44,8 @@ python3 -m venv ~/.venvs/pdfenv && ~/.venvs/pdfenv/bin/pip install pikepdf img2p
 Windows 移植的交接文档见 [`app/WINDOWS_移植交接.md`](app/WINDOWS_移植交接.md)，尚未实现。
 
 ## 已有 PDF 瘦身 / 加文字层
+
+图形界面里是「PDF 工具」标签页；命令行等价物：
 
 ```bash
 python scripts/shrink_pdf.py <PDF或目录> --analyze   # 体检：能省多少
