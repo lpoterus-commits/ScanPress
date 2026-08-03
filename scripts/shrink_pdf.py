@@ -28,6 +28,7 @@
 """
 import argparse
 import contextlib
+import json
 import os
 import re
 import shutil
@@ -412,6 +413,8 @@ def main():
     ap.add_argument("-o", "--output", help="输出文件(仅单个输入时有效)")
     ap.add_argument("--out-dir", help="批量输出目录(默认与原文件同目录,加 _slim 后缀)")
     ap.add_argument("--analyze", action="store_true", help="只体检不写文件")
+    ap.add_argument("--json", action="store_true", help="体检结果输出 JSON(供 GUI 解析)")
+    ap.add_argument("--force", action="store_true", help="允许覆盖已存在的输出文件")
     ap.add_argument("--sample", type=int, default=10, help="体检抽样页数(默认 10)")
     ap.add_argument("--jobs", type=int, default=max(2, (os.cpu_count() or 4) // 2))
     ap.add_argument("--progress", action="store_true", help="输出 @@ 进度行供 GUI 解析")
@@ -441,7 +444,14 @@ def main():
         for i, f in enumerate(files, 1):
             emit("P", "体检", i, len(files))
             rows.append(probe(f, o.sample))
-        report(rows)
+        if o.json:
+            for r in rows:                       # 每行一条,GUI 逐行解析,不必等全部跑完
+                r["est"] = (r["size"] - r["bi_bytes"] * (1 - r["ratio"])
+                            if r.get("ratio") is not None else r.get("size", 0))
+                r["name"] = os.path.basename(r["path"])
+                print("@@J" + json.dumps(r, ensure_ascii=False), flush=True)
+        else:
+            report(rows)
         return
 
     if o.output and len(files) > 1:
@@ -456,9 +466,12 @@ def main():
             d = o.out_dir or os.path.dirname(os.path.abspath(f))
             os.makedirs(d, exist_ok=True)
             base, ext = os.path.splitext(os.path.basename(f))
-            dst = os.path.join(d, base + SUFFIX + ext)
+            # 两条路的产物必须能一眼分开:_slim 是无损的,_mrc 是有画质取舍的
+            dst = os.path.join(d, base + ("_mrc" if o.mrc else SUFFIX) + ext)
         if os.path.abspath(dst) == os.path.abspath(f):
             die(f"输出会覆盖原文件: {dst}")
+        if os.path.exists(dst) and not o.force:
+            die(f"输出已存在(要覆盖请加 --force): {dst}")
         before = os.path.getsize(f)
         print(f"[{i}/{len(files)}] {os.path.basename(f)}  {human(before)}")
         if o.mrc:

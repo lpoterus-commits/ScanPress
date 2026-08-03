@@ -1363,12 +1363,486 @@ struct MergeView: View {
     }
 }
 
+// MARK: - PDF 工具(体检 / 无损瘦身 / 加文字层 / MRC 重制)
+
+/// 体检结果的一行。由 shrink_pdf.py --analyze --json 逐行吐出的 @@J 解析而来。
+struct ProbeRow: Identifiable {
+    let id = UUID()
+    var path: String
+    var name: String
+    var size: Int
+    var pages: Int
+    var bilevel: Int
+    var color: Int
+    var hasText: Bool
+    var est: Int
+    var selected = true
+
+    var kind: String {
+        if bilevel > 0 && color == 0 { return "黑白" }
+        if color > 0 && bilevel == 0 { return "彩色/灰度" }
+        return bilevel > 0 ? "混合" : "无图像"
+    }
+    /// 无损瘦身能省多少;彩色页这条路不适用,返回 nil
+    var saving: Double? {
+        guard bilevel > 0, size > 0, est < size else { return nil }
+        return 1 - Double(est) / Double(size)
+    }
+}
+
+final class PdfToolsModel: ObservableObject {
+    @Published var files: [URL] = []
+    @Published var rows: [ProbeRow] = []
+    @Published var mode = "shrink" { didSet { save() } }     // shrink / ocr / mrc
+    @Published var outDir: URL?
+    @Published var langs = "ko-KR,en-US,zh-Hans" { didSet { save() } }
+    // MRC 是备用路线(用户看过样张后否掉过),参数照搬教材档
+    @Published var mrcMask = 2600 { didSet { save() } }
+    @Published var mrcBg = 1500 { didSet { save() } }
+    @Published var mrcQuality = 50 { didSet { save() } }
+    @Published var mrcColorLayers = false { didSet { save() } }
+    @Published var mrcPages = ""
+
+    @Published var probing = false
+    @Published var running = false
+    @Published var phase = ""
+    @Published var progress = 0.0
+    @Published var log = ""
+    @Published var doneMsg: String?
+    @Published var failMsg: String?
+
+    private var task: Process?
+    private var buf = Data()
+
+    init() {
+        let d = UserDefaults.standard
+        if let m = d.string(forKey: "pdfMode") { mode = m }
+        if let l = d.string(forKey: "pdfLangs") { langs = l }
+        if d.object(forKey: "pdfMrcMask") != nil {
+            mrcMask = d.integer(forKey: "pdfMrcMask")
+            mrcBg = d.integer(forKey: "pdfMrcBg")
+            mrcQuality = d.integer(forKey: "pdfMrcQuality")
+            mrcColorLayers = d.bool(forKey: "pdfMrcColorLayers")
+        }
+    }
+
+    private func save() {
+        let d = UserDefaults.standard
+        d.set(mode, forKey: "pdfMode")
+        d.set(langs, forKey: "pdfLangs")
+        d.set(mrcMask, forKey: "pdfMrcMask")
+        d.set(mrcBg, forKey: "pdfMrcBg")
+        d.set(mrcQuality, forKey: "pdfMrcQuality")
+        d.set(mrcColorLayers, forKey: "pdfMrcColorLayers")
+    }
+
+    var script: String? {
+        Bundle.main.url(forResource: mode == "ocr" ? "ocr_pdf" : "shrink_pdf",
+                        withExtension: "py")?.path
+    }
+    var suffix: String { mode == "ocr" ? "_ocr" : (mode == "mrc" ? "_mrc" : "_slim") }
+
+    var selectedFiles: [URL] {
+        rows.isEmpty ? files
+            : rows.filter { $0.selected }.map { URL(fileURLWithPath: $0.path) }
+    }
+
+    func pick() {
+        let p = NSOpenPanel()
+        p.allowedContentTypes = [.pdf]
+        p.allowsMultipleSelection = true
+        p.canChooseDirectories = true
+        p.prompt = "添加"
+        p.message = "选择 PDF 或包含 PDF 的文件夹"
+        if p.runModal() == .OK { add(p.urls) }
+    }
+
+    func add(_ urls: [URL]) {
+        let fm = FileManager.default
+        for u in urls {
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: u.path, isDirectory: &isDir) else { continue }
+            if isDir.boolValue {
+                let inner = (try? fm.contentsOfDirectory(at: u, includingPropertiesForKeys: nil)) ?? []
+                for f in inner where f.pathExtension.lowercased() == "pdf" {
+                    if !files.contains(f) { files.append(f) }
+                }
+            } else if u.pathExtension.lowercased() == "pdf", !files.contains(u) {
+                files.append(u)
+            }
+        }
+        if outDir == nil, let f = files.first { outDir = f.deletingLastPathComponent() }
+        rows = []; doneMsg = nil; failMsg = nil
+    }
+
+    func chooseOutDir() {
+        let p = NSOpenPanel()
+        p.canChooseFiles = false
+        p.canChooseDirectories = true
+        p.canCreateDirectories = true
+        p.prompt = "选择"
+        p.message = "成品放到哪个文件夹(原文件不会被改动)"
+        if p.runModal() == .OK, let u = p.urls.first { outDir = u }
+    }
+
+    /// 体检:只读不写,抽样真压来估,不用经验系数
+    func probe() {
+        guard !files.isEmpty, !probing, !running,
+              let sp = Bundle.main.url(forResource: "shrink_pdf", withExtension: "py")?.path
+        else { return }
+        probing = true; rows = []; log = ""; doneMsg = nil; failMsg = nil
+        phase = "体检中…"; progress = 0
+        launch(script: sp, args: files.map { $0.path } + ["--analyze", "--json", "--progress"]) {
+            [weak self] ok in
+            self?.probing = false
+            self?.phase = ""
+            if !ok { self?.failMsg = "体检失败(见日志)" }
+        }
+    }
+
+    /// 返回将要写出的文件里已经存在的那些 —— 项目铁律:写文件前先查存在性再问
+    func existingOutputs() -> [URL] {
+        guard let d = outDir else { return [] }
+        return selectedFiles.compactMap { f in
+            let u = d.appendingPathComponent(
+                f.deletingPathExtension().lastPathComponent + suffix + ".pdf")
+            return FileManager.default.fileExists(atPath: u.path) ? u : nil
+        }
+    }
+
+    func start() {
+        guard !running, !probing, let sp = script, let d = outDir else { return }
+        let inputs = selectedFiles
+        guard !inputs.isEmpty else { failMsg = "没有选中任何文件"; return }
+
+        let clash = existingOutputs()
+        if !clash.isEmpty {
+            let a = NSAlert()
+            a.messageText = "有 \(clash.count) 个成品已经存在"
+            a.informativeText = clash.prefix(5).map { $0.lastPathComponent }
+                .joined(separator: "\n") + (clash.count > 5 ? "\n…" : "")
+            a.addButton(withTitle: "覆盖")
+            a.addButton(withTitle: "取消")
+            if a.runModal() != .alertFirstButtonReturn { return }
+        }
+
+        running = true; log = ""; doneMsg = nil; failMsg = nil; progress = 0
+        phase = "准备…"
+        var args = inputs.map { $0.path } + ["--out-dir", d.path, "--force", "--progress"]
+        if mode == "ocr" {
+            args += ["--lang", langs]
+        } else if mode == "mrc" {
+            args += ["--mrc",
+                     "--mrc-mask-width", String(mrcMask),
+                     "--mrc-bg-width", String(mrcBg),
+                     "--mrc-bg-quality", String(mrcQuality)]
+            if mrcColorLayers { args.append("--mrc-color-layers") }
+            let pg = mrcPages.trimmingCharacters(in: .whitespaces)
+            if !pg.isEmpty { args += ["--pages", pg] }
+        }
+        launch(script: sp, args: args) { [weak self] ok in
+            guard let self = self else { return }
+            self.running = false
+            self.phase = ""
+            if ok {
+                if self.doneMsg == nil { self.doneMsg = "完成" }
+                NSSound.beep()
+            } else {
+                self.failMsg = "失败(见下方日志末尾)"
+            }
+        }
+    }
+
+    func cancel() { task?.terminate() }
+
+    private func launch(script: String, args: [String], done: @escaping (Bool) -> Void) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: Tools.python)
+        p.arguments = [script] + args
+        var env = ProcessInfo.processInfo.environment
+        Tools.apply(to: &env)
+        env["PYTHONUNBUFFERED"] = "1"
+        p.environment = env
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = pipe
+        buf = Data()
+        pipe.fileHandleForReading.readabilityHandler = { [weak self] h in
+            let d = h.availableData
+            guard !d.isEmpty, let self = self else { return }
+            DispatchQueue.main.async { self.consume(d) }
+        }
+        p.terminationHandler = { [weak self] proc in
+            DispatchQueue.main.async {
+                pipe.fileHandleForReading.readabilityHandler = nil
+                self?.task = nil
+                done(proc.terminationStatus == 0)
+            }
+        }
+        do { try p.run(); task = p } catch {
+            running = false; probing = false
+            failMsg = "无法启动:\(error.localizedDescription)"
+        }
+    }
+
+    private func consume(_ d: Data) {
+        buf.append(d)
+        while let nl = buf.firstIndex(of: 0x0a) {
+            let line = String(decoding: buf[buf.startIndex..<nl], as: UTF8.self)
+            buf.removeSubrange(buf.startIndex...nl)
+            if line.hasPrefix("@@J") {                       // 体检结果:一行一个 JSON
+                if let data = line.dropFirst(3).data(using: .utf8),
+                   let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    rows.append(ProbeRow(
+                        path: o["path"] as? String ?? "",
+                        name: o["name"] as? String ?? "?",
+                        size: o["size"] as? Int ?? 0,
+                        pages: o["pages"] as? Int ?? 0,
+                        bilevel: o["bilevel"] as? Int ?? 0,
+                        color: o["color"] as? Int ?? 0,
+                        hasText: o["has_text"] as? Bool ?? false,
+                        est: Int((o["est"] as? Double) ?? Double(o["size"] as? Int ?? 0))))
+                }
+            } else if line.hasPrefix("@@") {
+                let f = line.dropFirst(2).split(separator: " ").map(String.init)
+                if f.first == "S", f.count >= 2 { phase = f[1] + "…" }
+                if f.first == "P", f.count >= 4, let a = Double(f[2]), let b = Double(f[3]), b > 0 {
+                    phase = "\(f[1]) \(f[2])/\(f[3])"
+                    progress = a / b
+                }
+                if f.first == "DONE" { progress = 1 }
+            } else {
+                log += line + "\n"
+                if log.count > 40000 { log = String(log.suffix(30000)) }
+            }
+        }
+    }
+}
+
+struct PdfToolsView: View {
+    @StateObject var m = PdfToolsModel()
+    @State private var dropping = false
+    @State private var showLog = false
+
+    private func mb(_ n: Int) -> String { String(format: "%.1f MB", Double(n) / 1048576) }
+
+    var body: some View {
+        Form {
+            Section {
+                if m.files.isEmpty {
+                    HStack(spacing: 12) {
+                        Image(systemName: "doc.badge.gearshape")
+                            .font(.system(size: 26)).foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("把 PDF 或整个文件夹拖到这里").foregroundStyle(.secondary)
+                            Text("原文件永远不会被改动,成品另存为新文件")
+                                .font(.caption2).foregroundStyle(.tertiary)
+                        }
+                        Spacer()
+                        Button("添加…") { m.pick() }
+                    }
+                    .padding(12)
+                    .frame(maxWidth: .infinity)
+                    .background(RoundedRectangle(cornerRadius: 10)
+                        .fill(dropping ? Color.accentColor.opacity(0.15) : Color.secondary.opacity(0.08)))
+                    .overlay(RoundedRectangle(cornerRadius: 10)
+                        .strokeBorder(dropping ? Color.accentColor : Color.secondary.opacity(0.3),
+                                      style: StrokeStyle(lineWidth: dropping ? 2 : 1, dash: [6, 4])))
+                    .dropDestination(for: URL.self) { urls, _ in m.add(urls); return true }
+                        isTargeted: { dropping = $0 }
+                } else if m.rows.isEmpty {
+                    ForEach(m.files, id: \.self) { u in
+                        Text(u.lastPathComponent).lineLimit(1).truncationMode(.middle)
+                            .font(.callout)
+                    }
+                    HStack {
+                        Button("添加…") { m.pick() }
+                        Button("清空") { m.files.removeAll(); m.rows = [] }
+                        Spacer()
+                        Text("\(m.files.count) 个文件").font(.caption).foregroundStyle(.secondary)
+                    }
+                } else {
+                    pdfTable
+                }
+            } header: {
+                Label("要处理的 PDF", systemImage: "doc.badge.gearshape")
+            } footer: {
+                if !m.files.isEmpty && m.rows.isEmpty {
+                    Text("先点「体检」看看每本什么构成、能省多少 —— 抽样实压估算,不是拍脑袋的系数。")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+
+            Section {
+                Picker("处理方式", selection: $m.mode) {
+                    Text("无损瘦身(黑白页换 JBIG2 编码)").tag("shrink")
+                    Text("加可搜索的文字层(不改外观)").tag("ocr")
+                    Text("MRC 重制(彩色页,有画质取舍)").tag("mrc")
+                }
+                .pickerStyle(.radioGroup)
+
+                if m.mode == "shrink" {
+                    Text("位图一个比特都不变,放大到任何倍数都和原件相同 —— 没有画质取舍可谈。"
+                         + "实测四本自扫韩语书 354.8 MB → 148.6 MB。彩色页这条路帮不上忙。")
+                        .font(.caption2).foregroundStyle(.secondary)
+                } else if m.mode == "ocr" {
+                    LabeledContent("识别语言") {
+                        TextField("", text: $m.langs).frame(width: 220)
+                            .help("逗号分隔,如 ko-KR,en-US,zh-Hans。用 macOS 自带的 Vision,完全离线")
+                    }
+                    Text("页面外观逐像素不变,每页只增加约 1 KB。读者看到的永远是原图,"
+                         + "文字层只服务于 Cmd+F —— 所以偶有错字也看不见。")
+                        .font(.caption2).foregroundStyle(.secondary)
+                } else {
+                    mrcOptions
+                }
+            } header: {
+                Label("要做什么", systemImage: "slider.horizontal.3")
+            }
+
+            Section {
+                LabeledContent("成品放到") {
+                    HStack(spacing: 6) {
+                        Text(m.outDir?.lastPathComponent ?? "(未选)")
+                            .foregroundStyle(m.outDir == nil ? .tertiary : .primary)
+                            .lineLimit(1).truncationMode(.middle)
+                        Button("换位置…") { m.chooseOutDir() }
+                    }
+                }
+                Text("文件名会自动加 「\(m.suffix)」 后缀,原文件保持不动。")
+                    .font(.caption2).foregroundStyle(.secondary)
+            } header: {
+                Label("输出", systemImage: "folder")
+            }
+
+            Section {
+                HStack(spacing: 10) {
+                    Button("体检") { m.probe() }
+                        .disabled(m.files.isEmpty || m.probing || m.running)
+                    Button(m.mode == "shrink" ? "开始瘦身"
+                           : (m.mode == "ocr" ? "开始加文字层" : "开始重制")) { m.start() }
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(m.files.isEmpty || m.running || m.probing || m.outDir == nil)
+                    if m.running || m.probing {
+                        Button("取消") { m.cancel() }
+                        ProgressView(value: m.progress).frame(width: 120)
+                    }
+                    Text(m.phase).font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                }
+                if let d = m.doneMsg {
+                    Label(d, systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+                }
+                if let f = m.failMsg {
+                    Label(f, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                }
+                DisclosureGroup("日志", isExpanded: $showLog) {
+                    ScrollView {
+                        Text(m.log).font(.system(size: 11, design: .monospaced))
+                            .frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
+                    }.frame(height: 150)
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .dropDestination(for: URL.self) { urls, _ in m.add(urls); return true }
+    }
+
+    private var pdfTable: some View {
+        VStack(spacing: 4) {
+            ForEach($m.rows) { $r in
+                HStack(spacing: 8) {
+                    Toggle("", isOn: $r.selected).labelsHidden()
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(r.name).lineLimit(1).truncationMode(.middle).font(.callout)
+                        HStack(spacing: 6) {
+                            Text("\(r.pages) 页").font(.caption2).foregroundStyle(.secondary)
+                            Text(r.kind).font(.caption2).foregroundStyle(.secondary)
+                            if r.hasText {
+                                Text("有文字层").font(.caption2).foregroundStyle(.blue)
+                            }
+                        }
+                    }
+                    Spacer()
+                    if let s = r.saving {
+                        Text("\(mb(r.size)) → \(mb(r.est))")
+                            .font(.caption).monospacedDigit()
+                        Text(String(format: "省 %.0f%%", s * 100))
+                            .font(.caption2).foregroundStyle(.green)
+                            .frame(width: 46, alignment: .trailing)
+                    } else {
+                        Text(mb(r.size)).font(.caption).monospacedDigit()
+                        Text(r.color > 0 ? "彩色" : "—")
+                            .font(.caption2).foregroundStyle(.tertiary)
+                            .frame(width: 46, alignment: .trailing)
+                    }
+                }
+                .padding(.vertical, 1)
+            }
+            let sel = m.rows.filter { $0.selected }
+            let now = sel.reduce(0) { $0 + $1.size }
+            let est = sel.reduce(0) { $0 + $1.est }
+            Divider()
+            HStack {
+                Button("全选") { for i in m.rows.indices { m.rows[i].selected = true } }
+                    .buttonStyle(.borderless).font(.caption)
+                Button("只选黑白") {
+                    for i in m.rows.indices { m.rows[i].selected = m.rows[i].saving != nil }
+                }.buttonStyle(.borderless).font(.caption)
+                Button("重新体检") { m.probe() }.buttonStyle(.borderless).font(.caption)
+                Spacer()
+                if now > 0 {
+                    Text("选中 \(sel.count) 个:\(mb(now)) → \(mb(est))")
+                        .font(.caption).monospacedDigit()
+                    if now > est {
+                        Text(String(format: "省 %.0f%%", (1 - Double(est) / Double(now)) * 100))
+                            .font(.caption).foregroundStyle(.green)
+                    }
+                }
+            }
+        }
+    }
+
+    /// MRC 是备用路线:用户 2026-08-03 看过样张后否掉过(「还是觉得原图好看」),
+    /// 所以这里把话说明白,并默认建议先用「样张页」试几页,别一上来跑全书。
+    private var mrcOptions: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("这条路会改变画质。先填「样张页」试几页,满意了再跑全书",
+                  systemImage: "exclamationmark.triangle.fill")
+                .font(.caption).foregroundStyle(.orange)
+            LabeledContent("样张页") {
+                TextField("如 41-46", text: $m.mrcPages).frame(width: 190)
+                    .help("只重制这些页,用来看样张。留空 = 整本都重制")
+            }
+            LabeledContent("文字层宽") {
+                HStack(spacing: 4) {
+                    TextField("", value: $m.mrcMask, format: .number).frame(width: 70)
+                    Text("px").foregroundStyle(.secondary)
+                }
+            }.help("文字和线条走这个分辨率的黑白蒙版 —— MRC 省体积的关键就在这:它可以比彩色底图高好几倍")
+            LabeledContent("底图宽") {
+                HStack(spacing: 4) {
+                    TextField("", value: $m.mrcBg, format: .number).frame(width: 70)
+                    Text("px").foregroundStyle(.secondary)
+                }
+            }.help("色块/插图走这个分辨率的彩色 JPEG。糊的就是它")
+            LabeledContent("底图质量") {
+                TextField("", value: $m.mrcQuality, format: .number).frame(width: 70)
+            }
+            Toggle("彩色文字分层", isOn: $m.mrcColorLayers)
+                .help("漫画/绘本适合开;彩色文字密集的教材开了会「像被虫啃」——同一笔画被劈在锐利蒙版层和模糊底图之间")
+        }
+    }
+}
+
 struct RootView: View {
     @State private var tab = 0
     var body: some View {
         TabView(selection: $tab) {
             ConvertView()
                 .tabItem { Label("图片转 PDF", systemImage: "photo.on.rectangle.angled") }.tag(0)
+            PdfToolsView()
+                .tabItem { Label("PDF 工具", systemImage: "doc.badge.gearshape") }.tag(2)
             MergeView()
                 .tabItem { Label("合并 PDF", systemImage: "doc.on.doc") }.tag(1)
         }

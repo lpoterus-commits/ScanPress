@@ -185,6 +185,7 @@ def main():
     ap.add_argument("--lang", default=DEFAULT_LANGS, help=f"识别语言(默认 {DEFAULT_LANGS})")
     ap.add_argument("--width", type=int, default=2000, help="送进 OCR 的渲染宽度 px(默认 2000)")
     ap.add_argument("--jobs", type=int, default=max(2, (os.cpu_count() or 4) // 2))
+    ap.add_argument("--force", action="store_true", help="允许覆盖已存在的输出")
     ap.add_argument("--progress", action="store_true")
     o = ap.parse_args()
 
@@ -214,6 +215,8 @@ def main():
             dst = os.path.join(d, base + SUFFIX + ext)
         if os.path.abspath(dst) == os.path.abspath(f):
             die(f"输出会覆盖原文件: {dst}")
+        if os.path.exists(dst) and not o.force:
+            die(f"输出已存在(要覆盖请加 --force): {dst}")
         print(f"[{i}/{len(files)}] {os.path.basename(f)}")
         lines, pages = ocr_pdf(f, dst, helper, o.lang, o.width, o.jobs)
         before, after = os.path.getsize(f), os.path.getsize(dst)
