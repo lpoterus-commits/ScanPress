@@ -39,13 +39,13 @@ ScanPress 2.1
 
 运行环境（重要）
 ---------------
-本应用调用以下命令行工具，缺任何一个都会在启动时以橙色面板提示：
+ImageMagick 与 jbig2enc 已内嵌在应用包里，不需要再装。
+目前还剩一个外部依赖 —— Python 环境，请在终端执行这两行：
 
-  brew install imagemagick jbig2enc
   python3 -m venv ~/.venvs/pdfenv
-  ~/.venvs/pdfenv/bin/pip install pikepdf img2pdf
+  ~/.venvs/pdfenv/bin/pip install pikepdf img2pdf Pillow
 
-因此本应用只能在装好上述工具的 Mac 上运行，不是自包含的。
+缺它时启动会以橙色面板提示。
 
 
 其他

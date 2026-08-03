@@ -28,6 +28,24 @@ ScanPress/
 构建并安装:`python3 app/build_app.py`(只需 Xcode Command Line Tools,不需完整 Xcode)。
 `build_app.py` 按 `../scripts/` 找引擎脚本并复制进 .app,**改完脚本必须重跑它**,否则应用里还是旧引擎。
 
+## 依赖内嵌进 .app(2026-08-03)
+`build_app.py` 的 `bundle_tools()` 把 magick / jbig2 / jbig2topdf.py 连同 **127 个 coder 模块 + 17 个 dylib**
+(15 MB,包总大小 20 MB)搬进包内,`install_name_tool` 把依赖路径改写成 `@loader_path` 相对引用,
+运行时由 `ScanToPDF.swift` 的 `enum Tools` 设 `PATH` / `MAGICK_CONFIGURE_PATH` /
+`MAGICK_CODER_MODULE_PATH` / `MAGICK_FILTER_MODULE_PATH` 指过去。**GUI 从此不需要 homebrew**
+(命令行直接跑 scan2pdf.py 仍需要,它走 PATH)。**Python 环境 pdfenv 尚未内嵌,仍是外部依赖。**
+排错过程中确认的四件事(详见 `维护交接.md` 第 5 节):
+- **这个 homebrew 版 ImageMagick 是模块化编译**(目录名 `lib/ImageMagick/modules-Q16HDRI/`,不带 `-7`),
+  不搬模块则连 JPEG 都读不了(`no decode delegate`)。
+- **libltdl 认 `.la` 不认 `.so`**,且 `.la` 里的 `libdir=` 绝对路径会把 homebrew 那份 `.so` 拽回来加载
+  ——**必须清空成 `libdir=''`**,否则本机测试全绿、换机器就崩。最阴的一个坑。
+- **`heic.so` → libheif → x265 是 GPL-2.0**,不能进 MIT 应用;`TAINTED_LIB_PAT` 按依赖闭包自动排除
+  (实测只命中 heic 一个,顺带省 13 MB)。potrace 同理,永不内嵌。
+- 带执行位的 `.py` 放 `Contents/Helpers/` 会被 codesign 当未签名的嵌套代码,故 `jbig2topdf.py` 放 `Resources/`。
+
+**验证方法**(唯一可信的):`env -i PATH=<Helpers>:/usr/bin:/bin` 跑真实转换,再与 homebrew 版逐图像流比 md5。
+bw / mrc 两模式各 20 页实测**逐字节一致**——内嵌没有改变任何输出。
+
 ## 环境依赖(homebrew 工具链,GUI 启动时自检)
 - `/opt/homebrew/bin`:`magick`(ImageMagick 7)、`jbig2`(jbig2enc)+ `jbig2topdf.py`、`potrace`(仅矢量模式)
 - **pdfenv**:`~/.venvs/pdfenv`(pikepdf / img2pdf / Pillow)。重建:

@@ -17,6 +17,37 @@ func homeFile(_ rel: String) -> String {
     FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(rel).path
 }
 
+/// 包内自带的工具链(build_app.py 把 magick / jbig2 / jbig2topdf.py 连同 dylib 搬了进来)。
+/// 有就用包内的,没有(用 --no-bundle-tools 构建的瘦身包)再回落到 homebrew。
+enum Tools {
+    static let helpers = Bundle.main.bundleURL
+        .appendingPathComponent("Contents/Helpers").path
+    static let magickConfig = Bundle.main.bundleURL
+        .appendingPathComponent("Contents/Resources/ImageMagick").path
+
+    /// 包内工具链是否齐备(jbig2topdf.py 是纯脚本,放在 Resources 里,由 scan2pdf.py 自己就近找)
+    static var bundled: Bool {
+        let fm = FileManager.default
+        return ["magick", "jbig2"].allSatisfy { fm.isExecutableFile(atPath: "\(helpers)/\($0)") }
+            && Bundle.main.url(forResource: "jbig2topdf", withExtension: "py") != nil
+    }
+
+    /// 子进程的 PATH:包内优先,homebrew 兜底(potrace 等未内嵌的工具还得靠它)
+    static var searchPath: String {
+        (bundled ? "\(helpers):" : "") + "\(BREW):/usr/bin:/bin:/usr/sbin:/sbin"
+    }
+
+    /// 给子进程加上工具链相关的环境变量
+    static func apply(to env: inout [String: String]) {
+        env["PATH"] = searchPath
+        guard bundled else { return }
+        // 这个 ImageMagick 是模块化编译的:coder 都是单独的 .so,不指路连 JPEG 都读不出来
+        env["MAGICK_CONFIGURE_PATH"] = "\(magickConfig)/etc:\(magickConfig)/share:\(magickConfig)/config"
+        env["MAGICK_CODER_MODULE_PATH"] = "\(magickConfig)/modules/coders"
+        env["MAGICK_FILTER_MODULE_PATH"] = "\(magickConfig)/modules/filters"
+    }
+}
+
 /// 统一的行标签:固定宽度右对齐,让「基本」与「高级」两组 Grid 的标签列对齐
 func L(_ s: String) -> some View {
     Text(s).frame(width: 78, alignment: .trailing)
@@ -187,10 +218,12 @@ final class Model: ObservableObject {
         if !fm.isExecutableFile(atPath: pythonPath) {
             miss.append("Python 环境 pdfenv(~/.venvs/pdfenv)—— 终端执行:python3 -m venv ~/.venvs/pdfenv && ~/.venvs/pdfenv/bin/pip install pikepdf img2pdf")
         }
-        for (bin, hint) in [("magick", "brew install imagemagick"),
-                            ("jbig2", "brew install jbig2enc"),
-                            ("jbig2topdf.py", "brew install jbig2enc")] {
-            if !fm.isExecutableFile(atPath: "\(BREW)/\(bin)") { miss.append("\(bin) —— 终端执行:\(hint)") }
+        if !Tools.bundled {          // 包内自带工具链时无需检查 homebrew
+            for (bin, hint) in [("magick", "brew install imagemagick"),
+                                ("jbig2", "brew install jbig2enc"),
+                                ("jbig2topdf.py", "brew install jbig2enc")] {
+                if !fm.isExecutableFile(atPath: "\(BREW)/\(bin)") { miss.append("\(bin) —— 终端执行:\(hint)") }
+            }
         }
         if scriptPath == nil { miss.append("scan2pdf.py(应用包内资源缺失,请重新构建)") }
         missing = miss
@@ -413,7 +446,7 @@ final class Job: ObservableObject, Identifiable {
         p.executableURL = URL(fileURLWithPath: python)
         p.arguments = args + ["--jobs", String(jobs), "--jbig2-slots", String(jbig2Workers)]
         var env = ProcessInfo.processInfo.environment
-        env["PATH"] = "\(BREW):/usr/bin:/bin:/usr/sbin:/sbin"
+        Tools.apply(to: &env)
         env["PYTHONUNBUFFERED"] = "1"
         p.environment = env
         let pipe = Pipe()

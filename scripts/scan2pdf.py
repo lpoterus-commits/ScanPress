@@ -387,6 +387,24 @@ def mrc_layers(src, outdir, tag, dark, chroma, mask_w, bg_w, bg_q, det_w=1600, c
     return rgbs
 
 
+def jbig2topdf(pre, work):
+    """跑 jbig2topdf.py 把 jbig2 输出转成 PDF 字节。
+
+    不直接靠它的 shebang(`#!/usr/bin/env python3`)执行:那样会在 PATH 上另找一个 python3,
+    在只装了本应用、没装开发者工具的机器上会落到 /usr/bin/python3 那个会弹「安装命令行工具」
+    的桩上。它只用标准库,所以拿当前解释器跑最稳。
+    """
+    # 应用包里它就躺在本脚本旁边(Contents/Resources);命令行下走 PATH 找 homebrew 那份
+    sibling = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jbig2topdf.py")
+    exe = sibling if os.path.exists(sibling) else shutil.which("jbig2topdf.py")
+    if not exe:
+        die("找不到 jbig2topdf.py(随 jbig2enc 一起装:brew install jbig2enc)")
+    r = subprocess.run([sys.executable, exe, pre], cwd=work, capture_output=True)
+    if r.returncode != 0 or not r.stdout:
+        die(f"jbig2topdf.py 失败: {r.stderr.decode('utf-8', 'replace')[:300]}")
+    return r.stdout
+
+
 def mrc_compose(work, tag, groups, bg_paths, colors, slots):
     """groups: [[黑蒙版相对路径...], [c0...], [c1...], [c2...]];每组一次 JBIG2(共享词典)。"""
     docs = []
@@ -397,13 +415,11 @@ def mrc_compose(work, tag, groups, bg_paths, colors, slots):
                 os.remove(os.path.join(work, f))
         with jbig2_slot(slots):
             run(["jbig2", "-s", "-p", "-t", "0.95", "-b", pre] + rels, cwd=work)
-        r = subprocess.run(["jbig2topdf.py", pre], cwd=work, capture_output=True)
-        if r.returncode != 0 or not r.stdout:
-            die(f"jbig2topdf.py 失败: {r.stderr.decode('utf-8', 'replace')[:300]}")
+        pdf_bytes = jbig2topdf(pre, work)
         for f in os.listdir(work):
             if f.startswith(pre + "."):
                 os.remove(os.path.join(work, f))
-        docs.append(pikepdf.open(io.BytesIO(r.stdout)))
+        docs.append(pikepdf.open(io.BytesIO(pdf_bytes)))
 
     out = pikepdf.new()
     for i, bgp in enumerate(bg_paths):
@@ -530,12 +546,10 @@ def jbig2_pdf(work, rel_pngs, out_pdf, tag="", slots=MAX_CHUNKS):
                 os.remove(os.path.join(work, f))
         with jbig2_slot(slots):          # 抢到全局名额才真正开压(跨进程自适应)
             run(["jbig2", "-s", "-p", "-t", "0.95", "-b", pre] + files, cwd=work)
-        r = subprocess.run(["jbig2topdf.py", pre], cwd=work, capture_output=True)
-        if r.returncode != 0 or not r.stdout:
-            die(f"jbig2topdf.py 失败: {r.stderr.decode('utf-8', 'replace')[:300]}")
+        pdf_bytes = jbig2topdf(pre, work)
         part = os.path.join(work, f"{pre}.pdf")
         with open(part, "wb") as fh:                      # 输出是二进制 PDF,不能走文本管道
-            fh.write(r.stdout)
+            fh.write(pdf_bytes)
         for f in os.listdir(work):                        # 段内中间流文件即刻删掉(千页书可达数百 MB)
             if f.startswith(pre + ".") and not f.endswith(".pdf"):
                 os.remove(os.path.join(work, f))
