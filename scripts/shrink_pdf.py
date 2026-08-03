@@ -24,6 +24,8 @@
 import argparse
 import contextlib
 import os
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -282,6 +284,123 @@ def shrink(src, dst, jobs=4):
     return os.path.getsize(dst), skipped, len(targets)
 
 
+# ---------------------------------------------------------------- ② MRC 重制
+def load_engine():
+    """借用 scan2pdf.py 的 MRC 实现。mrc_layers 是全项目最难的函数(六轮排错的成果),
+    绝不在这里重写一遍 —— 两处分层逻辑一旦分家,以后改一边忘一边必出事。"""
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import scan2pdf
+    return scan2pdf
+
+
+def text_ops(page):
+    """把一页里「画文字」的操作挑出来(BT…ET 之间的部分),其余(画图像等)全部丢弃。
+
+    MRC 重制会把一张图换成「底图 + 若干蒙版」,页面内容流必须重建;而原页可能带着
+    OCR 过的文字层(实测那本 167 MB 的韩语教材就有)——**丢了它等于把可搜索的书压成
+    不可搜索的**,那是用户眼里的倒退,比省下的体积重要得多。
+    """
+    try:
+        ops = pikepdf.parse_content_stream(page)
+    except Exception:
+        return None
+    keep, inside = [], False
+    for operands, operator in ops:
+        o = str(operator)
+        if o == "BT":
+            inside = True
+        if inside:
+            keep.append((operands, operator))
+        if o == "ET":
+            inside = False
+    if not keep:
+        return None
+    try:
+        return pikepdf.unparse_content_stream(keep)
+    except Exception:
+        return None
+
+
+def page_single_image(page):
+    """只处理「整页就是一张图」的页面(扫描书的常态)。多图/矢量页原样保留,不冒险。"""
+    ims = list(page.get_images().values())
+    return ims[0] if len(ims) == 1 else None
+
+
+def remake_mrc(src, dst, opt):
+    """把彩色/灰度扫描页用 MRC 分层重做。**这条有画质取舍**,先用 --pages 出样张再全书跑。"""
+    sp = load_engine()
+    pdf = pikepdf.open(src)
+    n = len(pdf.pages)
+    idx = [i for i in range(n) if not opt.pages or (i + 1) in opt.pages]
+    todo = [i for i in idx if page_single_image(pdf.pages[i]) is not None]
+    if not todo:
+        die("没有「整页一张图」的页面可重制(多图或矢量页不处理)")
+
+    work = tempfile.mkdtemp(prefix="spmrc")
+    emit("S", "导出")
+    srcs = {}
+    for k, i in enumerate(todo):
+        im = page_single_image(pdf.pages[i])
+        srcs[i] = pikepdf.PdfImage(im).extract_to(fileprefix=os.path.join(work, f"src{k:05d}"))
+        emit("P", "导出", k + 1, len(todo))
+
+    emit("S", "分层")
+    colors = {}
+
+    def one(i):
+        c = sp.mrc_layers(srcs[i], work, f"p{i:05d}", opt.mrc_dark, opt.mrc_chroma,
+                          opt.mrc_mask_width, opt.mrc_bg_width, opt.mrc_bg_quality,
+                          color_layers=opt.mrc_color_layers)
+        colors[i] = c or [(0.0, 0.0, 0.0)] * sp.MRC_SLOTS
+        return True
+
+    sp.pmap(one, todo, opt.jobs, "分层", "分层")
+
+    emit("S", "压缩")
+    groups = [[f"p{i:05d}_black.png" for i in todo]]
+    for c in range(sp.MRC_SLOTS):
+        groups.append([f"p{i:05d}_c{c}.png" for i in todo])
+    bgs = [os.path.join(work, f"p{i:05d}_bg.jpg") for i in todo]
+    new = sp.mrc_compose(work, "r", groups, bgs, [colors[i] for i in todo], opt.jbig2_slots)
+
+    emit("S", "写出")
+    out = pikepdf.new()
+    for i in range(n):
+        orig = pdf.pages[i]
+        if i not in todo:
+            out.pages.append(orig)                      # 没重制的页原样搬过去
+            continue
+        out.pages.append(new.pages[todo.index(i)])
+        page = out.pages[-1]
+        box = [float(v) for v in orig.MediaBox]
+        pw, ph = box[2] - box[0], box[3] - box[1]
+        # 跨文档不能直接把对象搬过来,取成纯数值再写
+        page.MediaBox = [box[0], box[1], box[2], box[3]]
+        if "/Rotate" in orig:
+            page.Rotate = int(orig.Rotate)              # 不带过来的话页面会转向
+        # 重建内容流:把各图层铺满原页面的尺寸(而不是 mrc_compose 默认的「像素即点」)
+        body = bytes(page.Contents.read_bytes()).decode("latin-1")
+        body = re.sub(r"\d+(?:\.\d+)? 0 0 \d+(?:\.\d+)? 0 0 cm",
+                      f"{pw:.3f} 0 0 {ph:.3f} {box[0]:.3f} {box[1]:.3f} cm", body)
+        txt = text_ops(orig)
+        if txt:                                          # 原有文字层原样接回去
+            body += "\n" + txt.decode("latin-1")
+            res = orig.get("/Resources")
+            if res is not None and "/Font" in res:
+                # copy_foreign 只收间接对象;源里的 /Font 常是直接写在页面上的,先提为间接
+                fonts = res["/Font"]
+                if not fonts.is_indirect:
+                    fonts = pdf.make_indirect(fonts)
+                page.Resources["/Font"] = out.copy_foreign(fonts)
+        page.Contents = out.make_stream(body.encode("latin-1"))
+    out.save(dst)
+    shutil.rmtree(work, ignore_errors=True)
+    return os.path.getsize(dst), len(todo), n
+
+
 def main():
     ap = argparse.ArgumentParser(description="给已有 PDF 瘦身(无损重压 1 位图像为 JBIG2)")
     ap.add_argument("inputs", nargs="+", help="PDF 文件或目录")
@@ -291,7 +410,22 @@ def main():
     ap.add_argument("--sample", type=int, default=10, help="体检抽样页数(默认 10)")
     ap.add_argument("--jobs", type=int, default=max(2, (os.cpu_count() or 4) // 2))
     ap.add_argument("--progress", action="store_true", help="输出 @@ 进度行供 GUI 解析")
+    g = ap.add_argument_group("MRC 重制(彩色/灰度页,有画质取舍)")
+    g.add_argument("--mrc", action="store_true", help="用 MRC 分层重做彩色页")
+    g.add_argument("--pages", help="只处理这些页(如 20-30),先出样张再全书跑")
+    g.add_argument("--mrc-dark", default="50%")
+    g.add_argument("--mrc-chroma", default="35%")
+    g.add_argument("--mrc-mask-width", type=int, default=2600)   # 教材档(GUI 默认)
+    g.add_argument("--mrc-bg-width", type=int, default=1500)
+    g.add_argument("--mrc-bg-quality", type=int, default=50)
+    g.add_argument("--mrc-color-layers", action="store_true",
+                   help="开彩色文字分层(漫画/绘本合适;彩字密集的教材开了会「像被虫啃」)")
+    g.add_argument("--jbig2-slots", type=int, default=8)
     o = ap.parse_args()
+    if o.pages:
+        o.pages = {int(x) for part in o.pages.split(",") for x in
+                   (range(int(part.split("-")[0]), int(part.split("-")[1]) + 1)
+                    if "-" in part else [int(part)])}
 
     global PROG
     PROG = o.progress
@@ -322,6 +456,11 @@ def main():
             die(f"输出会覆盖原文件: {dst}")
         before = os.path.getsize(f)
         print(f"[{i}/{len(files)}] {os.path.basename(f)}  {human(before)}")
+        if o.mrc:
+            after, made, total = remake_mrc(f, dst, o)
+            scope = f"{made}/{total} 页重制" + ("(样张)" if o.pages else "")
+            print(f"    → {human(after)}  {scope}  {dst}")
+            continue
         try:
             res = shrink(f, dst, o.jobs)
         except Exception as e:

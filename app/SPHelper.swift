@@ -93,17 +93,28 @@ func cmdOCR(_ args: [String]) {
 // MARK: - 渲染(供无损重压后的逐像素校验用)
 
 func cmdRender(_ args: [String]) {
-    guard args.count >= 5 else { fail("用法: sphelper render <PDF> <页码> <宽> <高> <输出.png>") }
+    guard args.count >= 5 else {
+        fail("用法: sphelper render <PDF> <页码> <宽> <高> <输出.png> [rgb]")
+    }
     guard let doc = CGPDFDocument(URL(fileURLWithPath: args[0]) as CFURL),
           let page = doc.page(at: Int(args[1]) ?? 1) else { fail("打不开 PDF 或页码越界") }
     guard let W = Int(args[2]), let H = Int(args[3]), W > 0, H > 0 else { fail("尺寸不合法") }
-    guard let ctx = CGContext(data: nil, width: W, height: H, bitsPerComponent: 8,
-                              bytesPerRow: W, space: CGColorSpaceCreateDeviceGray(),
-                              bitmapInfo: CGImageAlphaInfo.none.rawValue) else { fail("建不了画布") }
+    // 默认灰度(逐像素校验用,省内存);看画质样张时给 rgb
+    let rgb = args.count > 5 && args[5].lowercased() == "rgb"
+    let ctx: CGContext? = rgb
+        ? CGContext(data: nil, width: W, height: H, bitsPerComponent: 8, bytesPerRow: W * 4,
+                    space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
+        : CGContext(data: nil, width: W, height: H, bitsPerComponent: 8, bytesPerRow: W,
+                    space: CGColorSpaceCreateDeviceGray(),
+                    bitmapInfo: CGImageAlphaInfo.none.rawValue)
+    guard let ctx else { fail("建不了画布") }
     ctx.setFillColor(gray: 1, alpha: 1)
     ctx.fill(CGRect(x: 0, y: 0, width: W, height: H))
-    ctx.interpolationQuality = .none            // 校验用,不要任何插值/抗锯齿
-    ctx.setShouldAntialias(false)
+    if !rgb {
+        ctx.interpolationQuality = .none        // 逐像素校验:不要任何插值/抗锯齿
+        ctx.setShouldAntialias(false)
+    }
     let box = page.getBoxRect(.mediaBox)
     ctx.scaleBy(x: CGFloat(W) / box.width, y: CGFloat(H) / box.height)
     ctx.drawPDFPage(page)
