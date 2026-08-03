@@ -38,6 +38,27 @@ TOOL_BINS = ("magick", "jbig2")            # 要内嵌的可执行文件
 TOOL_SCRIPTS = ("jbig2topdf.py",)          # 纯 python 脚本,原样复制
 SYS_LIB_PREFIXES = ("/usr/lib", "/System")  # 系统自带,不搬
 
+# 内嵌的 Python 运行时:astral-sh/python-build-standalone 的可重定位 CPython。
+# 版本对齐用户原来 pdfenv 里的 3.14.6,行为不会有偏移。
+PY_VERSION, PY_RELEASE = "3.14.6", "20260728"
+PY_ASSET = f"cpython-{PY_VERSION}+{PY_RELEASE}-aarch64-apple-darwin-install_only_stripped.tar.gz"
+PY_URL = ("https://github.com/astral-sh/python-build-standalone/releases/download/"
+          f"{PY_RELEASE}/{PY_ASSET.replace('+', '%2B')}")
+PY_PKGS = ["pikepdf", "img2pdf", "Pillow"]     # scan2pdf.py / merge_pdfs.py 的全部第三方依赖
+CACHE = os.path.expanduser("~/.cache/scanpress")
+
+# Python 运行时里用不上的部分(占 18 MB):包管理器、IDE、C 头文件、测试套件、tkinter。
+# 注意 **lxml 不能删** —— pikepdf 导入时就要它,`--title` 写 dc:title 元数据也走它。
+PY_STRIP = ["lib/python{v}/site-packages/pip", "lib/python{v}/site-packages/pip-*.dist-info",
+            "lib/python{v}/site-packages/setuptools*", "lib/python{v}/site-packages/pkg_resources",
+            "lib/python{v}/ensurepip", "lib/python{v}/idlelib", "lib/python{v}/turtledemo",
+            "lib/python{v}/pydoc_data", "lib/python{v}/tkinter", "lib/python{v}/lib2to3",
+            "lib/python{v}/test", "lib/python{v}/site-packages/*/test",
+            "lib/python{v}/site-packages/*/tests", "lib/python{v}/lib-dynload/_tkinter*.so",
+            "lib/python{v}/site-packages/lxml/includes",
+            "lib/python{v}/site-packages/lxml/isoschematron",
+            "include", "share", "lib/pkgconfig"]
+
 # 许可证不兼容 / 用不上的库。凡依赖链碰到这些的 coder 模块一律不内嵌。
 # **x265 是 GPL-2.0**,由 heic.so → libheif → x265 牵进来,打包进 MIT 应用会构成违约;
 # 本工具只处理 JPEG/PNG/TIFF 扫描图,丢掉 HEIC/AVIF 一系毫无损失,顺带省 13 MB。
@@ -205,6 +226,81 @@ def bundle_tools(app):
     return True
 
 
+def prepare_python():
+    """备好一份装了 pikepdf/img2pdf/Pillow 并瘦过身的可重定位 CPython,缓存在 ~/.cache/scanpress。
+
+    第一次要联网(下 25 MB 运行时 + pip 装包),之后重建直接用缓存。
+    拿不到(离线且无缓存)就返回 None —— 构建照常进行,产出的包回落到用户的 ~/.venvs/pdfenv。
+    """
+    ready = os.path.join(CACHE, f"python-{PY_VERSION}-{PY_RELEASE}")
+    if os.path.isdir(ready):
+        return ready
+    os.makedirs(CACHE, exist_ok=True)
+    tarball = os.path.join(CACHE, PY_ASSET)
+    if not os.path.exists(tarball):
+        print(f"  下载 Python 运行时 {PY_VERSION}({PY_ASSET.split('-')[0]}, 约 25 MB)…")
+        r = subprocess.run(["curl", "-fsSL", "-o", tarball + ".part", PY_URL])
+        if r.returncode != 0:
+            print("  (下载失败,跳过内嵌 Python;产出的包仍需用户自备 ~/.venvs/pdfenv)")
+            return None
+        os.replace(tarball + ".part", tarball)
+
+    staging = ready + ".tmp"
+    shutil.rmtree(staging, ignore_errors=True)
+    os.makedirs(staging)
+    run(["tar", "-xzf", tarball, "-C", staging])
+    root = os.path.join(staging, "python")          # 压缩包内固定是 python/ 这一层
+    py = os.path.join(root, "bin", "python3")
+
+    print(f"  安装 {', '.join(PY_PKGS)}…")
+    r = subprocess.run([py, "-m", "pip", "install", "-q", "--no-cache-dir",
+                        "--no-warn-script-location"] + PY_PKGS)
+    if r.returncode != 0:
+        shutil.rmtree(staging, ignore_errors=True)
+        print("  (装包失败,跳过内嵌 Python)")
+        return None
+
+    v = ".".join(PY_VERSION.split(".")[:2])
+    for pat in PY_STRIP:
+        for p in glob.glob(os.path.join(root, pat.format(v=v))):
+            shutil.rmtree(p, ignore_errors=True) if os.path.isdir(p) else os.remove(p)
+
+    os.replace(root, ready)
+    shutil.rmtree(staging, ignore_errors=True)
+    return ready
+
+
+def bundle_python(app):
+    """把备好的 CPython 放进 Contents/Resources/python。成功返回 True。"""
+    src = prepare_python()
+    if not src:
+        return False
+    dst = os.path.join(app, "Contents", "Resources", "python")
+    shutil.copytree(src, dst, symlinks=True)
+    size = int(subprocess.run(["du", "-sm", dst], capture_output=True, text=True)
+               .stdout.split()[0])
+    print(f"  内嵌 Python {PY_VERSION} + {'/'.join(PY_PKGS)},{size} MB")
+    return True
+
+
+def macho_files(root):
+    """递归找出 Mach-O 文件(要逐个签名)。按魔数判断,比对后缀名靠谱。"""
+    out = []
+    for dirpath, _, names in os.walk(root):
+        for n in names:
+            p = os.path.join(dirpath, n)
+            if os.path.islink(p) or not os.path.isfile(p):
+                continue
+            try:
+                with open(p, "rb") as fh:
+                    magic = fh.read(4)
+            except OSError:
+                continue
+            if magic in (b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe", b"\xca\xfe\xba\xbe"):
+                out.append(p)
+    return out
+
+
 def write_licenses(res, libs, bins):
     """第三方组件的许可证。ImageMagick/jbig2enc/leptonica 等都要求分发时保留声明。"""
     out = os.path.join(res, "licenses")
@@ -239,9 +335,12 @@ def sign_inside_out(app):
         if os.path.isdir(d):
             targets += [os.path.join(d, n) for n in sorted(os.listdir(d))
                         if not n.endswith(".py")]
-    # coder/filter 模块也是 Mach-O,同样要签(否则整包签名时报 not signed at all)
-    targets += sorted(glob.glob(os.path.join(
-        app, "Contents/Resources/ImageMagick/modules/*/*.so")))
+    # coder/filter 模块和 Python 的扩展模块也都是 Mach-O,同样要签
+    # (漏一个,整包签名就报 "code object is not signed at all")
+    for sub in ("Contents/Resources/ImageMagick/modules", "Contents/Resources/python"):
+        d = os.path.join(app, sub)
+        if os.path.isdir(d):
+            targets += sorted(macho_files(d))
     for t in targets:
         run(["codesign", "--force", "--timestamp=none", "-s", "-", t])
     run(["codesign", "--force", "--timestamp=none", "-s", "-", app])
@@ -308,6 +407,8 @@ def main():
     ap.add_argument("--no-install", action="store_true")
     ap.add_argument("--no-bundle-tools", action="store_true",
                     help="不内嵌 magick/jbig2,产出的包需用户自备 homebrew 工具链")
+    ap.add_argument("--no-bundle-python", action="store_true",
+                    help="不内嵌 Python 运行时,产出的包需用户自备 ~/.venvs/pdfenv")
     o = ap.parse_args()
 
     for sc in SCRIPTS:
@@ -353,7 +454,9 @@ def main():
 
     print("4/6 内嵌工具链…")
     bundled = False if o.no_bundle_tools else bundle_tools(app)
+    py = False if o.no_bundle_python else bundle_python(app)
     info["SPBundledTools"] = bundled          # 供应用自检时判断包内有没有工具链
+    info["SPBundledPython"] = py
     with open(os.path.join(app, "Contents", "Info.plist"), "wb") as fh:
         plistlib.dump(info, fh)
 

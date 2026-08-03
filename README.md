@@ -27,15 +27,16 @@
 
 ## 运行环境
 
-**ImageMagick 和 jbig2enc 已经内嵌在 `.app` 里**（连同 127 个 coder 模块和全部 dylib，约 15 MB），
-装了应用就有，不必再 `brew install`。目前还剩一个外部依赖 —— Python 环境：
+**图形界面版是自包含的，装上就能用，不需要装任何东西。** ImageMagick、jbig2enc、
+以及一个装好 pikepdf/img2pdf/Pillow 的 Python 3.14 运行时都在 `.app` 里（约 128 MB）。
+
+命令行用法（直接跑 `scripts/scan2pdf.py`）走 PATH 找工具，所以仍需自备：
 
 ```bash
+brew install imagemagick jbig2enc
 python3 -m venv ~/.venvs/pdfenv && ~/.venvs/pdfenv/bin/pip install pikepdf img2pdf Pillow
 ```
 
-图形界面启动时会自检，缺什么用橙色面板提示。命令行用法（直接跑 `scripts/scan2pdf.py`）
-仍需自备 `brew install imagemagick jbig2enc`，因为它走 PATH 找工具。
 `--mode vector` 另需 `brew install potrace` —— 它是 GPL-2.0，**刻意不内嵌**，以免传染本项目的 MIT 许可。
 目前只在 Apple Silicon 的 macOS 上验证过。
 Windows 移植的交接文档见 [`app/WINDOWS_移植交接.md`](app/WINDOWS_移植交接.md)，尚未实现。

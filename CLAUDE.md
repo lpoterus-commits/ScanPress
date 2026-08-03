@@ -43,8 +43,15 @@ ScanPress/
   (实测只命中 heic 一个,顺带省 13 MB)。potrace 同理,永不内嵌。
 - 带执行位的 `.py` 放 `Contents/Helpers/` 会被 codesign 当未签名的嵌套代码,故 `jbig2topdf.py` 放 `Resources/`。
 
-**验证方法**(唯一可信的):`env -i PATH=<Helpers>:/usr/bin:/bin` 跑真实转换,再与 homebrew 版逐图像流比 md5。
-bw / mrc 两模式各 20 页实测**逐字节一致**——内嵌没有改变任何输出。
+**Python 也已内嵌**(同日):python-build-standalone 的可重定位 CPython **3.14.6**(刻意对齐原 pdfenv 版本)
++ pikepdf/img2pdf/Pillow,瘦身后 107 MB,**包总大小 128 MB**。`~/.cache/scanpress/` 缓存装好包的整棵树,
+只有第一次构建联网。**lxml 那 20 MB 删不得**——`import pikepdf` 就要它,`--title` 写 dc:title 也走它;
+能删的是 pip/ensurepip/idlelib/tkinter/测试套件/C 头文件(18 MB)。Python 扩展模块是几百个 `.so`,
+签名要**按 Mach-O 魔数递归找**,漏一个整包签名就失败。
+
+**验证方法**(唯一可信的):`env -i PATH=<Helpers>:/usr/bin:/bin` + **包内 python** 跑真实转换,
+再与 homebrew+pdfenv 版逐图像流比 md5(`page.get_images()`,不是 `page.images`)。
+bw / mrc 两模式各 20 页实测**逐字节一致**——内嵌没有改变任何输出。用 pdfenv 的 python 去测等于没测。
 
 ## 环境依赖(homebrew 工具链,GUI 启动时自检)
 - `/opt/homebrew/bin`:`magick`(ImageMagick 7)、`jbig2`(jbig2enc)+ `jbig2topdf.py`、`potrace`(仅矢量模式)

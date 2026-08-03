@@ -37,15 +37,10 @@ ScanPress 2.1
 设置会自动记住，下次打开还是你上次调好的样子。
 
 
-运行环境（重要）
----------------
-ImageMagick 与 jbig2enc 已内嵌在应用包里，不需要再装。
-目前还剩一个外部依赖 —— Python 环境，请在终端执行这两行：
-
-  python3 -m venv ~/.venvs/pdfenv
-  ~/.venvs/pdfenv/bin/pip install pikepdf img2pdf Pillow
-
-缺它时启动会以橙色面板提示。
+运行环境
+--------
+不需要装任何东西。ImageMagick、jbig2enc、以及带 pikepdf 的 Python 运行时
+都已经打包在应用里了，拖进「应用程序」即可使用。
 
 
 其他

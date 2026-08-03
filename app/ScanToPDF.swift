@@ -32,6 +32,14 @@ enum Tools {
             && Bundle.main.url(forResource: "jbig2topdf", withExtension: "py") != nil
     }
 
+    /// 包内自带的 Python(装好了 pikepdf/img2pdf/Pillow);没有则回落到用户的 pdfenv
+    static var python: String {
+        let inside = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/Resources/python/bin/python3").path
+        return FileManager.default.isExecutableFile(atPath: inside)
+            ? inside : homeFile(".venvs/pdfenv/bin/python")
+    }
+
     /// 子进程的 PATH:包内优先,homebrew 兜底(potrace 等未内嵌的工具还得靠它)
     static var searchPath: String {
         (bundled ? "\(helpers):" : "") + "\(BREW):/usr/bin:/bin:/usr/sbin:/sbin"
@@ -209,14 +217,14 @@ final class Model: ObservableObject {
     var scriptPath: String? {
         Bundle.main.url(forResource: "scan2pdf", withExtension: "py")?.path
     }
-    var pythonPath: String { homeFile(".venvs/pdfenv/bin/python") }
+    var pythonPath: String { Tools.python }
 
     /// 启动时自检外部依赖,缺什么直接告诉用户,不要等跑一半才失败
     func checkDeps() {
         let fm = FileManager.default
         var miss: [String] = []
         if !fm.isExecutableFile(atPath: pythonPath) {
-            miss.append("Python 环境 pdfenv(~/.venvs/pdfenv)—— 终端执行:python3 -m venv ~/.venvs/pdfenv && ~/.venvs/pdfenv/bin/pip install pikepdf img2pdf")
+            miss.append("Python 环境(应用包内未内嵌,且没有 ~/.venvs/pdfenv)—— 终端执行:python3 -m venv ~/.venvs/pdfenv && ~/.venvs/pdfenv/bin/pip install pikepdf img2pdf Pillow")
         }
         if !Tools.bundled {          // 包内自带工具链时无需检查 homebrew
             for (bin, hint) in [("magick", "brew install imagemagick"),
@@ -1007,7 +1015,7 @@ final class MergeModel: ObservableObject {
     var scriptPath: String? {
         Bundle.main.url(forResource: "merge_pdfs", withExtension: "py")?.path
     }
-    var pythonPath: String { homeFile(".venvs/pdfenv/bin/python") }
+    var pythonPath: String { Tools.python }
 
     func info(_ u: URL) -> String {
         let attrs = try? FileManager.default.attributesOfItem(atPath: u.path)
