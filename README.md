@@ -50,7 +50,7 @@ Windows 移植的交接文档见 [`app/WINDOWS_移植交接.md`](app/WINDOWS_移
 ```bash
 python scripts/shrink_pdf.py <PDF或目录> --analyze   # 体检：能省多少
 python scripts/shrink_pdf.py <PDF或目录>             # 无损重压
-python scripts/ocr_pdf.py <PDF> --lang ko-KR,en-US   # 加可搜索的隐形文字层
+python scripts/ocr_pdf.py <PDF> --lang ko-KR --sidecar  # 加隐形文字层 + 导出 .txt
 ```
 
 `shrink_pdf.py` 把 1 位黑白图的 CCITT G4 编码换成 JBIG2 通用编码 —— **位图一个比特都不变**，

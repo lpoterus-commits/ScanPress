@@ -58,6 +58,14 @@ ScanPress/
 全局的,并行会让「损坏流检测」串音——那是无损承诺唯一的保险,不值得为提速冒险);
 `find_modules()` 的 4.9 秒(构建期一次性成本)。
 
+## 自测脚本 selftest.py(2026-08-05)
+`~/.venvs/pdfenv/bin/python scripts/selftest.py`,约 10 秒 14 项。素材自画(magick),
+**不比金样哈希只查不变量**(bw 确定性/mrc 图层数/shrink 逐像素无损/ocr 外观不变+幂等/merge 页数),
+所以不会被 ImageMagick 或 macOS 升级误伤。**第一次跑就抓到真 bug**:ocr_pdf 在 worker 线程里
+并发访问 pikepdf(page_px 读 MediaBox + page_has_text 解析内容流),qpdf 非线程安全,
+跳过检测随机失灵、输出偶发损坏——修法是把一切 pikepdf 访问挪到主线程预扫。
+同日 ocr_pdf 新增:`--sidecar` 导出纯文本(grep 书架用);默认跳过已有文字层的页(幂等),`--redo` 强制。
+
 ## 依赖内嵌进 .app(2026-08-03)
 `build_app.py` 的 `bundle_tools()` 把 magick / jbig2 / jbig2topdf.py 连同 **127 个 coder 模块 + 17 个 dylib**
 (15 MB,包总大小 20 MB)搬进包内,`install_name_tool` 把依赖路径改写成 `@loader_path` 相对引用,

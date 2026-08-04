@@ -116,6 +116,28 @@ def text_layer(lines, pw, ph):
 
 
 # ---------------------------------------------------------------- 主流程
+def page_has_text(page):
+    """页面内容流里有没有真正的「画文字」操作(BT…ET 里的 Tj/TJ/'/\")。
+
+    默认跳过已有文字层的页:对已 OCR 过的书重跑会叠出第二层文字,搜索命中翻倍;
+    而且我们自己产出的隐形层也会被认出来,所以对成品重跑一遍 = 全部跳过,天然幂等。
+    """
+    try:
+        ops = pikepdf.parse_content_stream(page)
+    except Exception:
+        return False
+    inside = False
+    for _, operator in ops:
+        o = str(operator)
+        if o == "BT":
+            inside = True
+        elif o == "ET":
+            inside = False
+        elif inside and o in ("Tj", "TJ", "'", '"'):
+            return True
+    return False
+
+
 def page_px(page, target_w):
     box = [float(v) for v in page.MediaBox]
     pw, ph = box[2] - box[0], box[3] - box[1]
@@ -123,15 +145,27 @@ def page_px(page, target_w):
     return w, max(1, int(round(w * ph / pw))), pw, ph
 
 
-def ocr_pdf(src, dst, helper, langs, target_w, jobs):
+def ocr_pdf(src, dst, helper, langs, target_w, jobs, redo=False, sidecar=None):
     pdf = pikepdf.open(src)
     n = len(pdf.pages)
     emit("S", "识别")
     done = [0]
 
-    def one(i):
+    # 所有 pikepdf 访问(MediaBox、内容流解析)在这里**串行**做完 —— qpdf 不是线程安全的,
+    # 曾把这两个调用放进 worker 线程:跳过检测随机全部失灵(异常被吞成 False),
+    # save 出的文件也偶发损坏。worker 里只允许跑 subprocess。
+    metas = []
+    for i in range(n):
         page = pdf.pages[i]
         _, _, pw, ph = page_px(page, target_w)
+        metas.append(((not redo) and page_has_text(page), pw, ph))
+
+    def one(i):
+        skip, pw, ph = metas[i]
+        if skip:
+            done[0] += 1
+            emit("P", "识别", done[0], n)
+            return i, None, pw, ph              # None = 跳过(区别于「识别了但没字」的 [])
         lines = []
         # 渲染和识别合在一个进程里(sphelper ocrpage):不落地 PNG,每页省一次编码+读写+进程启动
         r = subprocess.run([helper, "ocrpage", src, str(i + 1), str(int(target_w)), langs],
@@ -147,6 +181,15 @@ def ocr_pdf(src, dst, helper, langs, target_w, jobs):
 
     with ThreadPoolExecutor(max_workers=jobs) as ex:
         results = list(ex.map(one, range(n)))
+    skipped = sum(1 for _, lines, _, _ in results if lines is None)
+
+    # sidecar:每页的识别文本,页与页之间用换页符 \f 隔开(pdftotext 同款,grep 友好)。
+    # 跳过的页(已有文字层)在这里是空段——它们的文字本来就能从 PDF 里搜到。
+    if sidecar:
+        with open(sidecar, "w", encoding="utf-8") as fh:
+            fh.write("\f\n".join(
+                "\n".join(ln["text"] for ln in (lines or []))
+                for _, lines, _, _ in sorted(results)) + "\n")
 
     emit("S", "写出")
     font = make_font(pdf)
@@ -165,7 +208,7 @@ def ocr_pdf(src, dst, helper, langs, target_w, jobs):
         res.Font["/SPF"] = font
         page.contents_add(pdf.make_stream(text_layer(lines, pw, ph)), prepend=False)
     pdf.save(dst)
-    return total, n
+    return total, n, skipped
 
 
 def main():
@@ -176,6 +219,10 @@ def main():
     ap.add_argument("--lang", default=DEFAULT_LANGS, help=f"识别语言(默认 {DEFAULT_LANGS})")
     ap.add_argument("--width", type=int, default=2000, help="送进 OCR 的渲染宽度 px(默认 2000)")
     ap.add_argument("--jobs", type=int, default=max(2, (os.cpu_count() or 4) // 2))
+    ap.add_argument("--sidecar", action="store_true",
+                    help="同时导出纯文本(.txt,页间用换页符 \\f 分隔)—— grep 整个书架用")
+    ap.add_argument("--redo", action="store_true",
+                    help="已有文字层的页也照样识别(默认跳过,避免叠两层、搜索命中翻倍)")
     ap.add_argument("--force", action="store_true", help="允许覆盖已存在的输出")
     ap.add_argument("--progress", action="store_true")
     o = ap.parse_args()
@@ -209,11 +256,14 @@ def main():
         if os.path.exists(dst) and not o.force:
             die(f"输出已存在(要覆盖请加 --force): {dst}")
         print(f"[{i}/{len(files)}] {os.path.basename(f)}")
-        lines, pages = ocr_pdf(f, dst, helper, o.lang, o.width, o.jobs)
+        side = os.path.splitext(dst)[0] + ".txt" if o.sidecar else None
+        lines, pages, skipped = ocr_pdf(f, dst, helper, o.lang, o.width, o.jobs,
+                                        redo=o.redo, sidecar=side)
         before, after = os.path.getsize(f), os.path.getsize(dst)
-        print(f"    {pages} 页,识别 {lines} 行  |  {before / 1048576:.1f} → "
+        skip_note = f",跳过 {skipped} 页(已有文字层)" if skipped else ""
+        print(f"    {pages} 页,识别 {lines} 行{skip_note}  |  {before / 1048576:.1f} → "
               f"{after / 1048576:.1f} MB(+{(after - before) / 1024 / max(1, pages):.1f} KB/页)")
-        print(f"    → {dst}")
+        print(f"    → {dst}" + (f"(+ 同名 .txt)" if side else ""))
     emit("DONE", 0, len(files), "")
 
 

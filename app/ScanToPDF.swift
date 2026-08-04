@@ -1411,6 +1411,7 @@ final class PdfToolsModel: ObservableObject {
     /// 历代默认值。存的还是某个旧默认值时自动升级到新默认;用户自己改过的一律不动。
     static let legacyLangs = ["ko-KR,en-US,zh-Hans"]
     @Published var langs = PdfToolsModel.defaultLangs { didSet { save() } }
+    @Published var ocrSidecar = true { didSet { save() } }   // 顺手导出 .txt,书架 grep 用
     // MRC 是备用路线(用户看过样张后否掉过),参数照搬教材档
     @Published var mrcMask = 2600 { didSet { save() } }
     @Published var mrcBg = 1500 { didSet { save() } }
@@ -1436,6 +1437,7 @@ final class PdfToolsModel: ObservableObject {
             // 加新语言时,老用户存着的旧默认值要跟着升级,否则新语言永远轮不到他
             langs = PdfToolsModel.legacyLangs.contains(l) ? PdfToolsModel.defaultLangs : l
         }
+        if d.object(forKey: "pdfOcrSidecar") != nil { ocrSidecar = d.bool(forKey: "pdfOcrSidecar") }
         if d.object(forKey: "pdfMrcMask") != nil {
             mrcMask = d.integer(forKey: "pdfMrcMask")
             mrcBg = d.integer(forKey: "pdfMrcBg")
@@ -1448,6 +1450,7 @@ final class PdfToolsModel: ObservableObject {
         let d = UserDefaults.standard
         d.set(mode, forKey: "pdfMode")
         d.set(langs, forKey: "pdfLangs")
+        d.set(ocrSidecar, forKey: "pdfOcrSidecar")
         d.set(mrcMask, forKey: "pdfMrcMask")
         d.set(mrcBg, forKey: "pdfMrcBg")
         d.set(mrcQuality, forKey: "pdfMrcQuality")
@@ -1549,6 +1552,7 @@ final class PdfToolsModel: ObservableObject {
         var args = inputs.map { $0.path } + ["--out-dir", d.path, "--force", "--progress"]
         if mode == "ocr" {
             args += ["--lang", langs]
+            if ocrSidecar { args.append("--sidecar") }
         } else if mode == "mrc" {
             args += ["--mrc",
                      "--mrc-mask-width", String(mrcMask),
@@ -1708,8 +1712,11 @@ struct PdfToolsView: View {
                         TextField("", text: $m.langs).frame(width: 220)
                             .help("逗号分隔,如 ko-KR,en-US,zh-Hans。用 macOS 自带的 Vision,完全离线")
                     }
+                    Toggle("同时导出纯文本(.txt)", isOn: $m.ocrSidecar)
+                        .help("识别结果顺手存一份同名 .txt(页间用换页符分隔)——在终端 grep 整个书架比逐本打开 PDF 搜快得多")
                     Text("页面外观逐像素不变,每页只增加约 1 KB。读者看到的永远是原图,"
-                         + "文字层只服务于 Cmd+F —— 所以偶有错字也看不见。")
+                         + "文字层只服务于 Cmd+F —— 所以偶有错字也看不见。"
+                         + "已有文字层的页会自动跳过,重复跑不会叠出第二层。")
                         .font(.caption2).foregroundStyle(.secondary)
                 } else {
                     mrcOptions
