@@ -235,7 +235,7 @@ def report(rows):
           if tot_now else "")
 
 
-def shrink(src, dst, jobs=4):
+def shrink(src, dst, jobs=4, slots=8):
     """无损重压:只替换 1 位图像的编码,PDF 其余结构(文字层/书签/注释)原样保留"""
     pdf = pikepdf.open(src)
     targets = [(i, im) for i, im in page_images(pdf) if is_bilevel(im)]
@@ -243,35 +243,34 @@ def shrink(src, dst, jobs=4):
         return None
     results = {}
     skipped = 0
+    sp = load_engine()      # 借 scan2pdf 的 jbig2_slot:与正在跑的转换任务共抢同一批全局名额
     with tempfile.TemporaryDirectory() as work:
-        emit("S", "解码")
-        pngs = {}
-        for k, (_, im) in enumerate(targets):          # 串行:见 decode_to_png 的说明
-            try:
-                png = decode_to_png(im, work, f"w{k}")
-            except Exception:
-                png = None
-            if png:
-                pngs[k] = png
-            else:
-                skipped += 1
-            emit("P", "解码", k + 1, len(targets))
-
         emit("S", "压缩")
-        done = [0]
 
-        def one(item):
-            k, png = item
+        def enc(k, png):
             try:
-                data = encode_png(png, work)
+                with sp.jbig2_slot(slots):
+                    return k, encode_png(png, work)
             except Exception:
-                data = None
-            done[0] += 1
-            emit("P", "压缩", done[0], len(pngs))
-            return k, data
+                return k, None
 
+        # 流水线:解码**必须串行**(capture_cstderr 的 fd 保险是进程全局的,见上),
+        # 但不必等全部解完——每解完一页立刻把编码扔进线程池,
+        # 墙钟 ≈ max(解码总时, 编码总时/并行度),而不是两者之和。保险本身一个字没动。
+        futs = []
         with ThreadPoolExecutor(max_workers=jobs) as ex:
-            for k, data in ex.map(one, list(pngs.items())):
+            for k, (_, im) in enumerate(targets):
+                try:
+                    png = decode_to_png(im, work, f"w{k}")
+                except Exception:
+                    png = None
+                if png:
+                    futs.append(ex.submit(enc, k, png))
+                else:
+                    skipped += 1
+                emit("P", "压缩", k + 1, len(targets))
+            for f in futs:
+                k, data = f.result()
                 results[k] = data
 
         for k, (_, im) in enumerate(targets):
@@ -480,7 +479,7 @@ def main():
             print(f"    → {human(after)}  {scope}  {dst}")
             continue
         try:
-            res = shrink(f, dst, o.jobs)
+            res = shrink(f, dst, o.jobs, o.jbig2_slots)
         except Exception as e:
             print(f"    失败: {str(e)[:120]}")
             continue
