@@ -90,6 +90,46 @@ func cmdOCR(_ args: [String]) {
     }
 }
 
+// MARK: - 渲染 + 识别一步到位
+
+/// 把 PDF 某页渲染成位图后直接喂给 Vision,**不落地成 PNG**。
+/// 分成 render+ocr 两个进程时,每页要多付一次 PNG 编码、一次写盘读盘、一次进程启动
+/// (实测单页 1 MB 的 PNG);合起来省掉这些,千页书省下的就不是零头了。
+func cmdOCRPage(_ args: [String]) {
+    guard args.count >= 3 else { fail("用法: sphelper ocrpage <PDF> <页码> <宽> [语言]") }
+    guard let doc = CGPDFDocument(URL(fileURLWithPath: args[0]) as CFURL),
+          let page = doc.page(at: Int(args[1]) ?? 1) else { fail("打不开 PDF 或页码越界") }
+    guard let W = Int(args[2]), W > 0 else { fail("宽度不合法") }
+    let langs = args.count > 3 && !args[3].isEmpty
+        ? args[3].split(separator: ",").map(String.init) : []
+
+    let box = page.getBoxRect(.mediaBox)
+    let H = max(1, Int((Double(W) * box.height / box.width).rounded()))
+    guard let ctx = CGContext(data: nil, width: W, height: H, bitsPerComponent: 8,
+                              bytesPerRow: W * 4, space: CGColorSpaceCreateDeviceRGB(),
+                              bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
+    else { fail("建不了画布") }
+    ctx.setFillColor(gray: 1, alpha: 1)
+    ctx.fill(CGRect(x: 0, y: 0, width: W, height: H))
+    ctx.scaleBy(x: CGFloat(W) / box.width, y: CGFloat(H) / box.height)
+    ctx.drawPDFPage(page)
+    guard let img = ctx.makeImage() else { fail("取不到位图") }
+
+    var pass = recognize(img, languages: langs, auto: true)
+    if pass.lines.isEmpty {
+        var best: Pass?
+        for l in langs {
+            let p = recognize(img, languages: [l], auto: false)
+            if !p.lines.isEmpty, best == nil || p.confidence > best!.confidence { best = p }
+        }
+        pass = best ?? recognize(img, languages: [], auto: false)
+    }
+    for line in pass.lines {
+        if let d = try? JSONSerialization.data(withJSONObject: line),
+           let s = String(data: d, encoding: .utf8) { print(s) }
+    }
+}
+
 // MARK: - 渲染(供无损重压后的逐像素校验用)
 
 func cmdRender(_ args: [String]) {
@@ -131,8 +171,9 @@ func cmdRender(_ args: [String]) {
 let argv = Array(CommandLine.arguments.dropFirst())
 guard let cmd = argv.first else { fail("用法: sphelper ocr|render|langs …") }
 switch cmd {
-case "ocr":    cmdOCR(Array(argv.dropFirst()))
-case "render": cmdRender(Array(argv.dropFirst()))
+case "ocr":     cmdOCR(Array(argv.dropFirst()))
+case "ocrpage": cmdOCRPage(Array(argv.dropFirst()))
+case "render":  cmdRender(Array(argv.dropFirst()))
 case "langs":
     let r = VNRecognizeTextRequest()
     r.recognitionLevel = .accurate

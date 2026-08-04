@@ -22,7 +22,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 from concurrent.futures import ThreadPoolExecutor
 
 import pikepdf
@@ -127,35 +126,27 @@ def page_px(page, target_w):
 def ocr_pdf(src, dst, helper, langs, target_w, jobs):
     pdf = pikepdf.open(src)
     n = len(pdf.pages)
-    work = tempfile.mkdtemp()
     emit("S", "识别")
     done = [0]
 
     def one(i):
         page = pdf.pages[i]
-        w, h, pw, ph = page_px(page, target_w)
-        png = os.path.join(work, f"p{i}.png")
+        _, _, pw, ph = page_px(page, target_w)
         lines = []
-        try:
-            r = subprocess.run([helper, "render", src, str(i + 1), str(w), str(h), png],
-                               capture_output=True)
-            if r.returncode == 0:
-                r2 = subprocess.run([helper, "ocr", png, langs], capture_output=True, text=True)
-                for row in r2.stdout.splitlines():
-                    try:
-                        lines.append(json.loads(row))
-                    except Exception:
-                        pass
-        finally:
-            if os.path.exists(png):
-                os.remove(png)
+        # 渲染和识别合在一个进程里(sphelper ocrpage):不落地 PNG,每页省一次编码+读写+进程启动
+        r = subprocess.run([helper, "ocrpage", src, str(i + 1), str(int(target_w)), langs],
+                           capture_output=True, text=True)
+        for row in r.stdout.splitlines():
+            try:
+                lines.append(json.loads(row))
+            except Exception:
+                pass
         done[0] += 1
         emit("P", "识别", done[0], n)
         return i, lines, pw, ph
 
     with ThreadPoolExecutor(max_workers=jobs) as ex:
         results = list(ex.map(one, range(n)))
-    os.rmdir(work) if not os.listdir(work) else None
 
     emit("S", "写出")
     font = make_font(pdf)

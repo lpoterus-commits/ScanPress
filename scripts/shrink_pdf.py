@@ -38,7 +38,6 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 
 import pikepdf
-from PIL import Image
 
 PROG = False
 SUFFIX = "_slim"
@@ -367,8 +366,9 @@ def remake_mrc(src, dst, opt):
 
     emit("S", "压缩")
     groups = [[f"p{i:05d}_black.png" for i in todo]]
-    for c in range(sp.MRC_SLOTS):
-        groups.append([f"p{i:05d}_c{c}.png" for i in todo])
+    if opt.mrc_color_layers:                  # 关分层时没有彩色层文件(见 scan2pdf.mrc_layers)
+        for c in range(sp.MRC_SLOTS):
+            groups.append([f"p{i:05d}_c{c}.png" for i in todo])
     bgs = [os.path.join(work, f"p{i:05d}_bg.jpg") for i in todo]
     new = sp.mrc_compose(work, "r", groups, bgs, [colors[i] for i in todo], opt.jbig2_slots)
 

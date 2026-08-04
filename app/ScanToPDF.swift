@@ -56,11 +56,6 @@ enum Tools {
     }
 }
 
-/// 统一的行标签:固定宽度右对齐,让「基本」与「高级」两组 Grid 的标签列对齐
-func L(_ s: String) -> some View {
-    Text(s).frame(width: 78, alignment: .trailing)
-}
-
 /// 文件名净化:粘贴进来的东西什么都可能有(换行、制表符、控制字符、路径分隔符)。
 /// 真实案例:某次「截图到剪贴板」失败,剪贴板里存的是 screencapture 的报错文本,
 /// 用户 Cmd+V 到文件名栏,那段报错就成了文件名的一部分。输入框一律先过这一道。
@@ -1017,11 +1012,26 @@ final class MergeModel: ObservableObject {
     }
     var pythonPath: String { Tools.python }
 
-    func info(_ u: URL) -> String {
-        let attrs = try? FileManager.default.attributesOfItem(atPath: u.path)
-        let size = (attrs?[.size] as? Int) ?? 0
-        let pages = PDFDocument(url: u)?.pageCount ?? 0
-        return String(format: "%d 页 · %.1f MB", pages, Double(size) / 1e6)
+    /// 「N 页 · X MB」的缓存。**别在视图 body 里直接开 PDF 数页数**:SwiftUI 每次状态变化
+    /// 都会重算 body,而 `PDFDocument(url:)` 打开一本 584 页的书要 82 ms —— 列表里放几本
+    /// 大书,转换时进度每跳一次界面就卡一下。所以加入文件时在后台算一次,之后只读缓存。
+    @Published private var infos: [URL: String] = [:]
+
+    func info(_ u: URL) -> String { infos[u] ?? "读取中…" }
+
+    private func loadInfo(_ urls: [URL]) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            var got: [URL: String] = [:]
+            for u in urls {
+                let size = (try? FileManager.default
+                    .attributesOfItem(atPath: u.path)[.size] as? Int) ?? 0
+                let pages = PDFDocument(url: u)?.pageCount ?? 0
+                got[u] = String(format: "%d 页 · %.1f MB", pages, Double(size) / 1e6)
+            }
+            DispatchQueue.main.async { [weak self] in
+                for (k, v) in got { self?.infos[k] = v }
+            }
+        }
     }
 
     func pick() {
@@ -1034,9 +1044,11 @@ final class MergeModel: ObservableObject {
     }
 
     func add(_ urls: [URL]) {
+        var fresh: [URL] = []
         for u in urls where u.pathExtension.lowercased() == "pdf" {
-            if !files.contains(u) { files.append(u) }
+            if !files.contains(u) { files.append(u); fresh.append(u) }
         }
+        loadInfo(fresh)
         if dest == nil, let f = files.first {
             dest = f.deletingLastPathComponent().appendingPathComponent("合并.pdf")
         }

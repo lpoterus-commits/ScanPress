@@ -247,7 +247,7 @@ def mrc_layers(src, outdir, tag, dark, chroma, mask_w, bg_w, bg_q, det_w=1600, c
     blk = os.path.join(outdir, f"{tag}_black.png")
     bgp = os.path.join(outdir, f"{tag}_bg.jpg")
     cols = [os.path.join(outdir, f"{tag}_c{i}.png") for i in range(MRC_SLOTS)]
-    if fresh(blk) and fresh(bgp) and all(fresh(c) for c in cols):
+    if fresh(blk) and fresh(bgp) and (not color_layers or all(fresh(c) for c in cols)):
         return None                                   # 断点续做:已完成
     tmp = os.path.join(outdir, f"{tag}_tmp")
 
@@ -260,19 +260,18 @@ def mrc_layers(src, outdir, tag, dark, chroma, mask_w, bg_w, bg_q, det_w=1600, c
          "-delete", "0", "-compose", "multiply", "-composite", "-negate", blk])
 
     if not color_layers:                      # 只做黑字层,彩字交给底图(观感均匀,无拼接感)
-        for c in cols:
-            run(["magick", blk, "-fill", "white", "-colorize", "100", c])
-        allm = f"{tmp}_all.png"
-        run(["magick", blk, allm])
+        # 这里**不生成**空的彩色层。以前会为每页跑 3 次 magick 造 3 张纯白图、再让
+        # mrc_compose 为它们各压一趟 JBIG2 —— 压出来每层才 100 字节,体积上完全看不出来,
+        # 但每页白白多花约 0.5 秒(2600px 更贵),百页以上的书就是一两分钟。
+        # 同时挖墨用的蒙版直接就是 blk,不必再拷一份(原来还是用 magick 拷的,单次 77ms)。
         w0, h0 = img_size(src)
-        run(["magick", src, "(", allm, "-resize", f"{w0}x{h0}!", ")", "-alpha", "off",
+        run(["magick", src, "(", blk, "-resize", f"{w0}x{h0}!", ")", "-alpha", "off",
              "-compose", "CopyOpacity", "-composite",
              "-resize", f"{bg_w}x>", "-background", "white", "-alpha", "remove", "-alpha", "off",
              "-level", "6%,94%", "-sigmoidal-contrast", "3.5,50%", "-modulate", "102,107,100",
              "-colorspace", "sRGB", "-strip", "-sampling-factor", "4:2:0",
              "-quality", str(bg_q), "-define", "jpeg:optimize-coding=true", bgp])
-        os.remove(allm)
-        return [(0.0, 0.0, 0.0)] * MRC_SLOTS
+        return []                             # 没有彩色层,调用方据此只组一个图层组
 
     # ② 彩墨(不分色):够暗 AND 色度高 AND 细结构
     run(["magick", src, "-resize", f"{det_w}x", tmp + "_s.png"])
@@ -669,8 +668,9 @@ def build(pages, covers, work, dest, o, width, quality, threshold, jobs, quiet=F
             die(f"分层缺 {len(missing)} 页(如 {missing[0]}),重跑本命令即可续做")
 
         groups = [[os.path.join(tag, "L", f"p{n:05d}_black.png") for _, n in content]]
-        for i in range(MRC_SLOTS):
-            groups.append([os.path.join(tag, "L", f"p{n:05d}_c{i}.png") for _, n in content])
+        if not o.mrc_no_color_layers:         # 关分层时根本没有彩色层文件,别去组它们
+            for i in range(MRC_SLOTS):
+                groups.append([os.path.join(tag, "L", f"p{n:05d}_c{i}.png") for _, n in content])
         bgs = [os.path.join(mdir, f"p{n:05d}_bg.jpg") for _, n in content]
         emit("S", "jbig2")
         cdoc = mrc_compose(work, tag, groups, bgs,
