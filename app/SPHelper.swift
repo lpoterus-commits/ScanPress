@@ -10,7 +10,7 @@
 //   sphelper render <PDF> <页码> <宽> <高> <输出.png>   → 按指定像素尺寸精确渲染
 //   sphelper langs                          → 本机 Vision 支持的识别语言
 //
-// OCR 的语言处理沿用 QuickDict 3 里那条实测经验:**不能把拉丁语和 CJK 塞进同一个
+// OCR 的语言处理沿用作者另一个取词工具的实测经验:**不能把拉丁语和 CJK 塞进同一个
 // recognitionLanguages 列表**,那样 Vision 对 CJK 会直接返回空;正确做法是先开
 // automaticallyDetectsLanguage 让它自己选模型,落空了再逐语言重试取置信度最高的。
 
