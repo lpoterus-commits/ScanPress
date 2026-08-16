@@ -193,7 +193,37 @@ def main():
                   "-o", os.path.join(tmp, "o2.pdf"), "--lang", "en-US", "--force"])
         check("对成品重跑全部跳过(幂等)", "跳过 3 页" in r2.stdout, r2.stdout.strip()[-120:])
 
-    print("T5 merge")
+    print("T5 mrc 重制:带旋转矩阵的页面")
+    # 真实事故:某书页面纵向 516×729,图像却是横向的,靠内容流里带 90° 旋转的 cm 摆进去。
+    # 早先版本自己按 MediaBox 算矩阵,把整本书转了 90°。这里造一个同构的页面守住它。
+    rot = os.path.join(tmp, "rot.pdf")
+    land = os.path.join(tmp, "land.jpg")     # 横向图
+    run(["magick", os.path.join(src, "img002.png"), "-rotate", "90", "-quality", "80", land])
+    flat = os.path.join(tmp, "flat.pdf")
+    with open(flat, "wb") as fh:             # 先用 img2pdf 造出合法的图像对象
+        fh.write(img2pdf.convert(land))
+    fsrc = pikepdf.open(flat)
+    d = pikepdf.new()
+    im = d.copy_foreign(next(iter(fsrc.pages[0].get_images().values())))
+    pg = d.add_blank_page(page_size=(420, 594))          # 纵向页面
+    pg.Resources = pikepdf.Dictionary(XObject=pikepdf.Dictionary(Im=im))
+    pg.Contents = d.make_stream(b"q 0 -594 420 0 0 594 cm /Im Do Q")   # 带旋转
+    d.save(rot)
+    rout = os.path.join(tmp, "rot_mrc.pdf")
+    run([PY, os.path.join(HERE, "shrink_pdf.py"), rot, "--mrc", "-o", rout,
+         "--mrc-mask-width", "800", "--mrc-bg-width", "300", "--force"])
+    if os.path.exists(rout):
+        rpdf = pikepdf.open(rout)        # 拿住引用,别让它在取 Contents 前被回收
+        body = bytes(rpdf.pages[0].Contents.read_bytes()).decode("latin-1")
+        # 原页的 b、c 分量非零(旋转),重制后必须仍然非零 —— 否则就是又把页面转正了
+        import re as _re
+        m = _re.search(r"([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) [-\d.]+ [-\d.]+ cm", body)
+        ok = bool(m) and abs(float(m.group(2))) + abs(float(m.group(3))) > 1
+        check("旋转矩阵被继承(不会把书转横)", ok, body[:80])
+    else:
+        check("带旋转页面能重制", False)
+
+    print("T6 merge")
     merged = os.path.join(tmp, "merged.pdf")
     if os.path.exists(a) and os.path.exists(m1):
         run([PY, os.path.join(HERE, "merge_pdfs.py"), merged, a, m1])

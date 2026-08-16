@@ -333,6 +333,48 @@ def page_single_image(page):
     return ims[0] if len(ims) == 1 else None
 
 
+def _mul(m, n):
+    """PDF 变换矩阵相乘(m 先作用,再 n),矩阵按 [a b c d e f] 排"""
+    a, b, c, d, e, f = m
+    A, B, C, D, E, F = n
+    return [a * A + b * C, a * B + b * D,
+            c * A + d * C, c * B + d * D,
+            e * A + f * C + E, e * B + f * D + F]
+
+
+def image_ctm(page):
+    """求「页面画那张图时」实际生效的变换矩阵(CTM)。
+
+    **必须照搬这个矩阵,不能自己按 MediaBox 算一个。** 实测某本 180 页韩语书:
+    页面是纵向 516×729,而图像是横向 6080×4256,内容流用
+    `q 0 -7296 5107.2 0 20.9999 7254.6 cm` 把图旋转 90° 摆进去。
+    我们的新图层与被替换的图同尺寸同朝向,所以沿用原矩阵就一切正确;
+    换成自己算的「铺满 MediaBox」矩阵,整本书就会横过来。
+    取不到时返回 None,由调用方回落到铺满页面。
+    """
+    try:
+        ops = pikepdf.parse_content_stream(page)
+    except Exception:
+        return None
+    ctm = [1, 0, 0, 1, 0, 0]
+    stack = []
+    for operands, operator in ops:
+        o = str(operator)
+        if o == "q":
+            stack.append(list(ctm))
+        elif o == "Q":
+            if stack:
+                ctm = stack.pop()
+        elif o == "cm" and len(operands) == 6:
+            try:
+                ctm = _mul([float(x) for x in operands], ctm)
+            except Exception:
+                return None
+        elif o == "Do":
+            return ctm          # 整页单图,第一个 Do 就是它
+    return None
+
+
 def remake_mrc(src, dst, opt):
     """把彩色/灰度扫描页用 MRC 分层重做。**这条有画质取舍**,先用 --pages 出样张再全书跑。"""
     sp = load_engine()
@@ -386,10 +428,25 @@ def remake_mrc(src, dst, opt):
         page.MediaBox = [box[0], box[1], box[2], box[3]]
         if "/Rotate" in orig:
             page.Rotate = int(orig.Rotate)              # 不带过来的话页面会转向
-        # 重建内容流:把各图层铺满原页面的尺寸(而不是 mrc_compose 默认的「像素即点」)
-        body = bytes(page.Contents.read_bytes()).decode("latin-1")
-        body = re.sub(r"\d+(?:\.\d+)? 0 0 \d+(?:\.\d+)? 0 0 cm",
-                      f"{pw:.3f} 0 0 {ph:.3f} {box[0]:.3f} {box[1]:.3f} cm", body)
+        # 重建内容流。**不要去正则改 mrc_compose 生成的那句 cm** —— 原页面可能用
+        # 带旋转的矩阵摆放图像(见 image_ctm 的说明),正则既匹配不上、改了也是错的。
+        # 正确做法是照搬原页面画那张图时的 CTM;取不到才回落到铺满 MediaBox。
+        ctm = image_ctm(orig) or [pw, 0, 0, ph, box[0], box[1]]
+        cm = " ".join(f"{v:.4f}" for v in ctm)
+        names = sorted((page.Resources.get("/XObject") or {}).keys(),
+                       key=lambda s: (s != "/Bg", s))       # 底图先画,蒙版后叠
+        rgbs = colors.get(i) or []
+        lines = []
+        for k in names:
+            key = str(k).lstrip("/")
+            if key == "Bg":
+                lines.append(f"q {cm} cm /Bg Do Q")
+                continue
+            # 蒙版是 ImageMask,得先设填充色:M0 是黑字层,M1..M3 用该页聚出的彩色
+            idx = int(key[1:]) if key[1:].isdigit() else 0
+            r, g, b = (0.0, 0.0, 0.0) if idx == 0 or idx > len(rgbs) else rgbs[idx - 1]
+            lines.append(f"q {r:.3f} {g:.3f} {b:.3f} rg {cm} cm /{key} Do Q")
+        body = "\n".join(lines) + "\n"
         txt = text_ops(orig)
         if txt:                                          # 原有文字层原样接回去
             body += "\n" + txt.decode("latin-1")
