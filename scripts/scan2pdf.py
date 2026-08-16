@@ -273,7 +273,19 @@ def mrc_layers(src, outdir, tag, dark, chroma, mask_w, bg_w, bg_q, det_w=1600, c
              "-quality", str(bg_q), "-define", "jpeg:optimize-coding=true", bgp])
         return []                             # 没有彩色层,调用方据此只组一个图层组
 
-    # ② 彩墨(不分色):够暗 AND 色度高 AND 细结构
+    # ②a 高分辨率的「彩墨」判据(够暗 AND 色度高),在 mask_w 上算 —— **笔画形状取自这里**。
+    # 早先是把 det_w(1600)上检测到的结果直接放大到 mask_w(2600)再取阈值,
+    # 低分辨率二值图放大 1.6 倍必然把细笔画打碎(用户实测:彩字像被虫啃)。
+    # 现在 det_w 那套只负责「哪片区域是文字而非插图」这种粗判断,粗判断经得起放大。
+    hiink = f"{tmp}_hiink.png"
+    run(["magick", src, "-resize", f"{mask_w}x",
+         "(", "-clone", "0", "-colorspace", "Gray", "-level", "15%,88%",
+         "-unsharp", "0x1.2+1.2+0.01", "-threshold", dark, "-negate", ")",
+         "(", "-clone", "0", "-colorspace", "HCL", "-channel", "G", "-separate",
+         "+channel", "-threshold", chroma, ")",
+         "-delete", "0", "-compose", "multiply", "-composite", hiink])
+
+    # ②b 彩墨(不分色):够暗 AND 色度高 AND 细结构
     run(["magick", src, "-resize", f"{det_w}x", tmp + "_s.png"])
     run(["magick", tmp + "_s.png",
          "(", "-clone", "0", "-colorspace", "HCL", "-channel", "G", "-separate",
@@ -352,16 +364,18 @@ def mrc_layers(src, outdir, tag, dark, chroma, mask_w, bg_w, bg_q, det_w=1600, c
                 run(["magick", parts[0], band])
             else:
                 run(["magick"] + parts + ["-compose", "lighten", "-layers", "flatten", band])
-            # 注意 "{mask_w}x" 不能写成 "{mask_w}x>":后者只缩不放,会让彩色层停在 det_w
-            # 彩色层经过"细结构过滤"和"色相带求交"两道减法,笔画会被削出缺口
-            #(用户实测:彩字像被虫啃)。这里补回来:
-            #   Close 填掉笔画内部的小洞 → Dilate 补上被削掉的边缘 → 笔画重新实心
-            # 稍微加粗一点点无妨,总比"实心块与模糊残影交错"好看得多。
+            # **笔画形状取自 mask_w 上的 hiink**,det_w 的两张(细结构 _ink、色相带 band)
+            # 只当区域门:放大后再故意 Dilate 一圈,让它们只回答"这一带是不是该色的文字",
+            # 而不参与决定笔画边缘 —— 边缘一旦由低分辨率图决定,细笔画就会碎成颗粒。
+            # 注意 "{mask_w}x" 不能写成 "{mask_w}x>":后者只缩不放,会让门停在 det_w。
+            gate = f"{tmp}_gate{i}.png"
             run(["magick", tmp + "_ink.png", band, "-compose", "multiply", "-composite",
-                 "-resize", f"{mask_w}x", "-threshold", "50%",
-                 "-morphology", "Close", "Disk:2",
-                 "-morphology", "Dilate", "Diamond:1",
+                 "-resize", f"{mask_w}x", "-threshold", "30%",
+                 "-morphology", "Dilate", "Disk:4", gate])
+            run(["magick", hiink, gate, "-compose", "multiply", "-composite",
+                 "-morphology", "Close", "Disk:1",      # 只填笔画内部的针孔,不加粗
                  "-negate", cols[i]])
+            os.remove(gate)
             rgbs.append(tuple(v / 255 for v in rgb))
         else:
             run(["magick", blk, "-fill", "white", "-colorize", "100", cols[i]])   # 空层
