@@ -134,16 +134,26 @@ final class Model: ObservableObject {
     @Published var pickedFiles = 0         // >0 表示当前是"选了 N 个文件"而非整个文件夹
     @Published var excludeText = ""
     @Published var title = ""
-    /// MRC 材料预设。两类材料的最优参数差别很大,直接给预设比让用户猜数字友好:
+    /// MRC 材料预设。几类材料的最优参数差别很大,直接给预设比让用户猜数字友好:
     ///   text  = 彩色教材/杂志(彩色文字多)→ 不做彩色分层,底图给足;实测 180 页 17.4 MB
     ///   comic = 漫画/绘本(黑字为主)     → 开彩色分层,底图可以很低;实测 198 页 14.2 MB
+    ///   white = **白底彩色书**(2026-08-05 新增)→ 底图 2600 + 开分层,约 190 KB/页
+    ///
+    /// ⚠ white 档为什么敢把底图开到 2600:白底书页面约 88% 是白的,白区在 JPEG 里几乎
+    /// 不占字节,所以同样的分辨率在白底书上便宜得多。**满页彩底的书千万别选这档**
+    /// ——那种书底图要覆盖整页,2600 会让体积暴涨且依然发糊(实测 213 KB/页仍不理想)。
+    /// 判断方法:满页色底 → text;大面积留白 + 明显彩色标题表格插图 → white;
+    /// 几乎纯白纸黑字(有色面积 <5%)→ 别用 MRC,bw 模式体积小一个数量级还更清晰。
     @Published var mrcPreset = "text" {
         didSet {
             guard loaded else { return }   // 启动恢复设置时不要用预设值盖掉用户微调过的数值
-            if mrcPreset == "text" {
-                mrcMaskWidth = 2600; mrcBgWidth = 1500; mrcBgQuality = 50; mrcColorLayers = false
-            } else {
+            switch mrcPreset {
+            case "comic":
                 mrcMaskWidth = 2200; mrcBgWidth = 500; mrcBgQuality = 35; mrcColorLayers = true
+            case "white":
+                mrcMaskWidth = 2600; mrcBgWidth = 2600; mrcBgQuality = 50; mrcColorLayers = true
+            default:      // text
+                mrcMaskWidth = 2600; mrcBgWidth = 1500; mrcBgQuality = 50; mrcColorLayers = false
             }
             save()
         }
@@ -372,7 +382,8 @@ final class Model: ObservableObject {
     /// 档位摘要(队列行显示用)
     var summary: String {
         if mode == "mrc" {
-            var t = ["彩色·文字锐化", mrcPreset == "text" ? "教材档" : "漫画档",
+            var t = ["彩色·文字锐化",
+                     mrcPreset == "text" ? "教材档" : (mrcPreset == "white" ? "白底档" : "漫画档"),
                      "文字 \(mrcMaskWidth == 0 ? "原生" : "\(mrcMaskWidth)px")",
                      "色彩 \(mrcBgWidth)px/q\(mrcBgQuality)"]
             if mrcColorLayers { t.append("彩字分层") }
@@ -880,12 +891,20 @@ struct ConvertView: View {
     var advancedRows: some View {
         if m.mode == "mrc" {
             Picker(selection: $m.mrcPreset) {
-                Text("彩色教材 / 杂志(彩色文字多)").tag("text")
+                Text("彩色教材 / 杂志(满页色底)").tag("text")
+                Text("白底彩色书(大面积留白)").tag("white")
                 Text("漫画 / 绘本(黑字为主)").tag("comic")
             } label: {
                 Label("材料类型", systemImage: "books.vertical")
             }
-            .help("两类材料的最优参数差别很大。选好类型后下面三项会自动设成对应的推荐值。")
+            .help("""
+                几类材料的最优参数差别很大,选好类型后下面三项会自动设成推荐值。怎么分:
+                ① 满页色底、大色块铺满 → 彩色教材。底图要覆盖整页,给高了只是体积暴涨、画质仍上不去。
+                ② 大面积留白 + 明显的彩色标题/表格/插图 → 白底彩色书。白区几乎不占体积,\
+                底图敢给到 2600,实测约 190 KB/页、接近原件。
+                ③ 基本是白纸黑字、几乎没有颜色 → 这几档都别用,直接选「黑白·最小」,\
+                那样体积小一个数量级而且更清晰。
+                """)
 
             Toggle(isOn: $m.mrcColorLayers) {
                 Text("彩色文字也做分层")
@@ -1414,6 +1433,18 @@ final class PdfToolsModel: ObservableObject {
     @Published var ocrSidecar = true { didSet { save() } }   // 顺手导出 .txt,书架 grep 用
     // MRC 是备用路线(用户看过样张后否掉过),参数照搬教材档
     @Published var mrcMask = 2600 { didSet { save() } }
+
+    /// 一键套用材料预设(与「图片转 PDF」页的 mrcPreset 同一组数值,别让两处漂移)
+    func applyPreset(_ name: String) {
+        switch name {
+        case "white":            // 白底彩色书:白区几乎不占字节,底图敢给到 2600
+            mrcMask = 2600; mrcBg = 2600; mrcQuality = 50; mrcColorLayers = true
+        case "comic":
+            mrcMask = 2200; mrcBg = 500; mrcQuality = 35; mrcColorLayers = true
+        default:                 // 满页色底的教材/杂志:底图要覆盖整页,给高了只是白花体积
+            mrcMask = 2600; mrcBg = 1500; mrcQuality = 50; mrcColorLayers = false
+        }
+    }
     @Published var mrcBg = 1500 { didSet { save() } }
     @Published var mrcQuality = 50 { didSet { save() } }
     @Published var mrcColorLayers = false { didSet { save() } }
@@ -1835,6 +1866,18 @@ struct PdfToolsView: View {
             Label("这条路会改变画质。先填「样张页」试几页,满意了再跑全书",
                   systemImage: "exclamationmark.triangle.fill")
                 .font(.caption).foregroundStyle(.orange)
+            LabeledContent("材料预设") {
+                HStack(spacing: 6) {
+                    Button("满页色底") { m.applyPreset("text") }
+                    Button("白底彩色书") { m.applyPreset("white") }
+                    Button("漫画绘本") { m.applyPreset("comic") }
+                }
+            }
+            .help("""
+                满页色底/大色块铺满 → 满页色底;大面积留白 + 明显的彩色标题表格插图 →\
+                白底彩色书(约 190 KB/页、接近原件);几乎是白纸黑字 → 这两档都别用,\
+                该书根本不需要 MRC,用「黑白·最小」体积小一个数量级还更清晰。
+                """)
             LabeledContent("样张页") {
                 TextField("如 41-46", text: $m.mrcPages).frame(width: 190)
                     .help("只重制这些页,用来看样张。留空 = 整本都重制")
